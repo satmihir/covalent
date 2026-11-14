@@ -150,10 +150,7 @@ mod tests {
             .map(|text| json!({"blocks": [{"kind": "text", "text": text}]}))
             .collect();
         std::fs::write(&script, serde_json::to_vec(&responses).unwrap()).unwrap();
-        let workspace = dir.join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
         let launch = Launch {
-            workspace,
             scripted: Some(script),
             ..Launch::default()
         };

@@ -33,7 +33,7 @@ cd web && npm run dev
 | Variable | Default | Meaning |
 |---|---|---|
 | `COVALENT_PORT` | `7420` | Loopback port to listen on. |
-| `COVALENT_DATA_DIR` | `~/.covalent` | Where the chat store and the empty Session workspace live. |
+| `COVALENT_DATA_DIR` | `~/.covalent` | Where the chat store lives. |
 | `COVALENT_WEB_DIR` | `web/dist` | The built frontend. |
 | `COVALENT_MODEL`, `COVALENT_EFFORT` | re:agent's defaults | Model and reasoning effort for chats. |
 | `COVALENT_TITLE_MODEL`, `COVALENT_TITLE_EFFORT` | re:agent's defaults | Model and effort for writing titles. |

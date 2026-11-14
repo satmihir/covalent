@@ -6,11 +6,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+/// PROMPT is the instruction every chat Session opens with, in place of re:agent's own.
+const PROMPT: &str = include_str!("prompt.txt");
+
+/// TITLE_PROMPT is the whole instruction for a title Session.
+const TITLE_PROMPT: &str = "You write titles for chats. Given the first message of a chat, reply \
+    with a title of at most six words and nothing else: no quotes, no trailing punctuation.";
+
 /// Launch holds the settings every chat Session opens with.
 #[derive(Clone, Debug, Default)]
 pub struct Launch {
-    /// workspace is an empty directory: chats have no files to work on yet.
-    pub workspace: PathBuf,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub title_model: Option<String>,
@@ -23,7 +28,6 @@ impl Launch {
     /// Options returns the Session settings for a chat, or for a title request.
     pub fn options(&self, title: bool) -> SessionOptions {
         SessionOptions {
-            workspace: self.workspace.clone(),
             model: if title {
                 self.title_model.clone()
             } else {
@@ -35,9 +39,8 @@ impl Launch {
                 self.effort.clone()
             },
             scripted: self.scripted.clone(),
-            // Until re:agent has tool-free conversations, read-only on an empty directory
-            // leaves the model nothing it can change or read.
-            read_only: true,
+            tool_free: true,
+            instructions: Some(if title { TITLE_PROMPT } else { PROMPT }.into()),
             agents: false,
             checkpoint: !title,
             origin: Some("covalent".into()),

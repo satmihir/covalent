@@ -23,13 +23,8 @@ fn ask(launch: &Launch, message: &str) -> Result<String, String> {
 
 fn request(api: &SessionApi, message: &str) -> Result<String, String> {
     let excerpt: String = message.chars().take(2000).collect();
-    let prompt = format!(
-        "Write a title of at most six words for a chat that begins with the message below. \
-         Reply with the title only: no quotes, no trailing punctuation, no tools.\n\n\
-         <message>\n{excerpt}\n</message>"
-    );
     let run = api
-        .send_message("title", prompt.as_bytes(), PlanMode::Keep)
+        .send_message("title", excerpt.as_bytes(), PlanMode::Keep)
         .map_err(|e| e.message)?
         .run
         .ok_or("title request admitted without a Run")?;

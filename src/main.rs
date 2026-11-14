@@ -18,14 +18,11 @@ async fn serve() -> Result<(), String> {
         Some(dir) => PathBuf::from(dir),
         None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?).join(".covalent"),
     };
-    let workspace = data.join("workspace");
-    std::fs::create_dir_all(&workspace)
-        .map_err(|e| format!("create {}: {e}", workspace.display()))?;
+    std::fs::create_dir_all(&data).map_err(|e| format!("create {}: {e}", data.display()))?;
     let store =
         store::Store::open(&data.join("covalent.db")).map_err(|e| format!("open store: {e}"))?;
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let launch = chats::Launch {
-        workspace,
         model: env("COVALENT_MODEL"),
         effort: env("COVALENT_EFFORT"),
         title_model: env("COVALENT_TITLE_MODEL"),
