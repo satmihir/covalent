@@ -133,6 +133,7 @@ export function App() {
       next[event.message_id] = {
         seq: event.seq,
         text: event.restarted || !known ? event.text : known.text + event.text,
+        searching: event.searching,
       };
     }
     showPreviews(next);
@@ -210,8 +211,8 @@ export function App() {
     const requestId = crypto.randomUUID();
     const now = Date.now();
     const optimistic: Message[] = [
-      { id: requestId, chat_id: chatId ?? "", role: "user", text, status: "complete", reason: null, created_at_ms: now },
-      { id: `local:${requestId}`, chat_id: chatId ?? "", role: "assistant", text: "", status: "pending", reason: null, created_at_ms: now },
+      { id: requestId, chat_id: chatId ?? "", role: "user", text, status: "complete", reason: null, created_at_ms: now, sources: [] },
+      { id: `local:${requestId}`, chat_id: chatId ?? "", role: "assistant", text: "", status: "pending", reason: null, created_at_ms: now, sources: [] },
     ];
     const isOptimistic = (m: Message) => optimistic.some((o) => o.id === m.id);
     setNotice(null);

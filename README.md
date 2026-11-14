@@ -42,6 +42,13 @@ re:agent's own settings, such as `REAGENT_OPENAI_BASE_URL`, apply as usual.
 Sessions are saved in re:agent's session store with the origin label
 `covalent`, which keeps them out of the CLI's session picker and `--continue`.
 
+## Web search
+
+New chats can search the web through the provider's hosted search (re:agent's
+`web_search` option). While a search runs the reply shows "Searching the web…";
+a finished reply lists the pages it cites under the text. Title requests never
+search. Chats created before search was added keep their saved setting.
+
 ## Models and archiving
 
 The model picker offers the catalog models whose provider has credentials

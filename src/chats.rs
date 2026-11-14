@@ -1,7 +1,7 @@
 use crate::store::{Chat, Message, Store};
 use reagent::session_api::{
-    self, ApiError, CommandState, HistoryMode, PlanMode, RunKind, RunRef, SessionApi,
-    SessionChange, SessionOptions,
+    self, ApiError, CommandState, HistoryMode, PlanMode, PreviewCursor, PreviewPage, RunKind,
+    RunRef, SessionApi, SessionChange, SessionOptions,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -44,6 +44,7 @@ impl Launch {
             instructions: Some(if title { TITLE_PROMPT } else { PROMPT }.into()),
             agents: false,
             checkpoint: !title,
+            web_search: !title,
             origin: Some("covalent".into()),
             ..SessionOptions::default()
         }
@@ -69,6 +70,8 @@ pub enum Event {
         /// restarted means the model started its reply over: text replaces what was shown.
         restarted: bool,
         text: String,
+        /// searching is true while the provider runs a web search for this reply.
+        searching: bool,
     },
 }
 
@@ -85,6 +88,7 @@ pub struct Model {
 pub struct Preview {
     pub seq: u64,
     pub text: String,
+    pub searching: bool,
 }
 
 /// Failure is a request error with the HTTP status it should produce.
@@ -307,6 +311,7 @@ impl Chats {
             status: "complete".into(),
             reason: None,
             created_at_ms: now,
+            sources: vec![],
         };
         let reply = Message {
             id: run.run_id.clone(),
@@ -362,14 +367,17 @@ impl Chats {
             if page.finished {
                 break;
             }
+            let searched = cursor.is_some_and(|c: PreviewCursor| c.searching) != page.searching;
             cursor = Some(page.next);
-            if page.restarted || !page.text.is_empty() {
-                self.preview(chat_id, &run.run_id, page.restarted, page.text);
+            if page.restarted || !page.text.is_empty() || searched {
+                self.preview(chat_id, &run.run_id, &page);
             }
         }
+        let mut sources = Vec::new();
         let (text, status, reason) = match api.wait_run(run).map(|info| info.result) {
             Ok(Some(result)) => {
                 let text = String::from_utf8_lossy(&result.reply).into_owned();
+                sources = result.sources;
                 match result.status.as_str() {
                     "completed" | "refused" => (text, "complete", None),
                     "cancelled" => (text, "cancelled", None),
@@ -393,7 +401,7 @@ impl Chats {
         let store = self.store.lock().unwrap();
         // The final reply replaces the preview; a stopped reply shows none of its partial text.
         self.previews.lock().unwrap().remove(&run.run_id);
-        match store.finish_message(&run.run_id, &text, status, reason.as_deref()) {
+        match store.finish_message(&run.run_id, &text, status, reason.as_deref(), &sources) {
             Ok(message) => {
                 let _ = self.events.send(Event::Message { message });
             }
@@ -403,22 +411,24 @@ impl Chats {
 
     /// Preview records a pending reply's new text and announces it under the same lock,
     /// so a reload sees either the text or the event that follows it.
-    fn preview(&self, chat_id: &str, message_id: &str, restarted: bool, text: String) {
+    fn preview(&self, chat_id: &str, message_id: &str, page: &PreviewPage) {
         let mut previews = self.previews.lock().unwrap();
         let (_, preview) = previews
             .entry(message_id.to_owned())
             .or_insert_with(|| (chat_id.to_owned(), Preview::default()));
         preview.seq += 1;
-        if restarted {
+        if page.restarted {
             preview.text.clear();
         }
-        preview.text.push_str(&text);
+        preview.text.push_str(&page.text);
+        preview.searching = page.searching;
         let _ = self.events.send(Event::Preview {
             chat_id: chat_id.into(),
             message_id: message_id.into(),
             seq: preview.seq,
-            restarted,
-            text,
+            restarted: page.restarted,
+            text: page.text.clone(),
+            searching: page.searching,
         });
     }
 

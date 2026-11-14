@@ -1,3 +1,4 @@
+use reagent::session_api::Source;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::path::Path;
@@ -27,6 +28,8 @@ pub struct Message {
     pub status: String,
     pub reason: Option<String>,
     pub created_at_ms: i64,
+    /// sources lists the pages a reply cites from web search, in first-cited order.
+    pub sources: Vec<Source>,
 }
 
 /// Store keeps chats and their displayed messages in one SQLite file.
@@ -56,13 +59,17 @@ impl Store {
             );",
         )?;
         // Columns added after the first release; SQLite has no ADD COLUMN IF NOT EXISTS.
-        let columns: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('chats')")?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (column, kind) in [("model", "TEXT"), ("archived_at_ms", "INTEGER")] {
+        for (table, column, kind) in [
+            ("chats", "model", "TEXT"),
+            ("chats", "archived_at_ms", "INTEGER"),
+            ("messages", "sources", "TEXT"),
+        ] {
+            let columns: Vec<String> = conn
+                .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
             if !columns.iter().any(|c| c == column) {
-                conn.execute_batch(&format!("ALTER TABLE chats ADD COLUMN {column} {kind}"))?;
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
             }
         }
         // re:agent never restarts work that was in flight, so neither does the display.
@@ -181,10 +188,12 @@ impl Store {
         text: &str,
         status: &str,
         reason: Option<&str>,
+        sources: &[Source],
     ) -> rusqlite::Result<Message> {
+        let sources = (!sources.is_empty()).then(|| serde_json::to_string(sources).unwrap());
         self.conn.execute(
-            "UPDATE messages SET text = ?2, status = ?3, reason = ?4 WHERE id = ?1",
-            params![id, text, status, reason],
+            "UPDATE messages SET text = ?2, status = ?3, reason = ?4, sources = ?5 WHERE id = ?1",
+            params![id, text, status, reason, sources],
         )?;
         self.conn
             .query_row("SELECT * FROM messages WHERE id = ?1", [id], message)
@@ -211,6 +220,10 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
         status: row.get("status")?,
         reason: row.get("reason")?,
         created_at_ms: row.get("created_at_ms")?,
+        sources: row
+            .get::<_, Option<String>>("sources")?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -227,6 +240,7 @@ mod tests {
             status: status.into(),
             reason: None,
             created_at_ms: 1,
+            sources: vec![],
         }
     }
 

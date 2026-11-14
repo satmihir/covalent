@@ -252,9 +252,14 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|m| (m["role"].as_str().unwrap(), m["status"].as_str().unwrap()))
+            .map(|m| m["role"].as_str().unwrap())
             .collect();
-        assert_eq!(roles, [("user", "complete"), ("assistant", "pending")]);
+        assert_eq!(roles, ["user", "assistant"]);
+        // A scripted reply can finish before the send response is built.
+        assert!(matches!(
+            sent["messages"][1]["status"].as_str(),
+            Some("pending" | "complete")
+        ));
 
         let body = settled(&app, &id).await;
         let reply = &body["messages"][1];
@@ -364,15 +369,39 @@ mod tests {
                         write!(stream, "event: {kind}\ndata: {event}\n\n").is_ok()
                             && stream.flush().is_ok()
                     };
-                    let done = |text: &str| {
-                        let output = json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]);
+                    // A chat reply searches once and cites one page; a title does neither.
+                    let done = |text: &str, cited: bool| {
+                        let annotations = if cited {
+                            json!([{"type":"url_citation","start_index":0,"end_index":9,"url":"https://bread.example/sourdough","title":"Sourdough basics"}])
+                        } else {
+                            json!([])
+                        };
+                        let message = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text,"annotations":annotations}]});
+                        let output = if cited {
+                            json!([{"type":"web_search_call","id":"ws","status":"completed","action":{"type":"search","query":"sourdough"}}, message])
+                        } else {
+                            json!([message])
+                        };
                         json!({"type":"response.completed","response":{"id":"fixture","status":"completed","model":"gpt-6.1-sol","output":output,"usage":{"input_tokens":5,"output_tokens":2}}})
                     };
                     let delta = |text: &str| json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":text});
                     if title {
-                        send(done("Baking Bread"));
+                        send(done("Baking Bread", false));
                         return;
                     }
+                    if !body["tools"]
+                        .as_array()
+                        .is_some_and(|tools| tools.contains(&json!({"type":"web_search"})))
+                    {
+                        send(done("NO SEARCH TOOL", false));
+                        return;
+                    }
+                    send(
+                        json!({"type":"response.web_search_call.searching","item_id":"ws","output_index":0}),
+                    );
+                    send(
+                        json!({"type":"response.web_search_call.completed","item_id":"ws","output_index":0}),
+                    );
                     send(delta("Sourdough"));
                     while !release.exists() {
                         if !send(json!({"type":"keepalive"})) {
@@ -381,7 +410,7 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     send(delta(" rises."));
-                    send(done("Sourdough rises."));
+                    send(done("Sourdough rises.", true));
                 });
             }
         });
@@ -434,7 +463,9 @@ mod tests {
             let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
             if body["previews"][&reply]["text"] == "Sourdough" {
                 assert_eq!(body["messages"][1]["status"], "pending");
-                assert_eq!(body["previews"][&reply]["seq"], 1);
+                // Search start and end were previews 1 and 2.
+                assert_eq!(body["previews"][&reply]["seq"], 3);
+                assert_eq!(body["previews"][&reply]["searching"], false);
                 break;
             }
             assert!(Instant::now() < end, "no preview: {body}");
@@ -443,18 +474,25 @@ mod tests {
         std::fs::write(std::env::var("COVALENT_TEST_RELEASE").unwrap(), b"").unwrap();
         let body = settled(&app, &id).await;
         assert_eq!(body["messages"][1]["text"], "Sourdough rises.");
+        assert_eq!(
+            body["messages"][1]["sources"],
+            json!([{"url":"https://bread.example/sourdough","title":"Sourdough basics"}])
+        );
         assert_eq!(body["previews"], json!({}));
 
         let mut previews = vec![];
+        let mut searched = false;
         while let Ok(event) = events.try_recv() {
             let event = serde_json::to_value(event).unwrap();
             if event["type"] == "preview" {
+                searched |= event["searching"] == true;
                 previews.push((
                     event["seq"].as_u64().unwrap(),
                     event["text"].as_str().unwrap().to_owned(),
                 ));
             }
         }
+        assert!(searched, "no preview reported the search");
         let text: String = previews.iter().map(|(_, text)| text.as_str()).collect();
         assert_eq!(text, "Sourdough rises.");
         assert!(previews

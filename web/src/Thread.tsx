@@ -1,7 +1,8 @@
 import { memo, useLayoutEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message, Preview } from "./api";
+import type { Message, Preview, Source } from "./api";
+import { GlobeIcon } from "./icons";
 
 type Props = {
   chatId: string | null;
@@ -25,6 +26,42 @@ const Reply = memo(function Reply({ text }: { text: string }) {
     </div>
   );
 });
+
+/** Link drops OpenAI's tracking parameter; the cited page is the same. */
+function link(url: string): { href: string; host: string } {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.delete("utm_source");
+    return { href: parsed.toString(), host: parsed.hostname.replace(/^www\./, "") };
+  } catch {
+    return { href: url, host: url };
+  }
+}
+
+function Sources({ sources }: { sources: Source[] }) {
+  return (
+    <div className="sources" aria-label="Sources">
+      {sources.map((source, i) => {
+        const { href, host } = link(source.url);
+        return (
+          <a key={source.url} className="source" href={href} target="_blank" rel="noreferrer" title={source.title || href}>
+            <span className="source-number">{i + 1}</span>
+            {host}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+function Searching() {
+  return (
+    <div className="searching" role="status">
+      <GlobeIcon />
+      <span>Searching the web…</span>
+    </div>
+  );
+}
 
 function Status({ message, onRetry }: { message: Message; onRetry?: (m: Message) => void }) {
   switch (message.status) {
@@ -82,11 +119,15 @@ export function Thread({ chatId, messages, previews, onRetry }: Props) {
             </div>
           ) : (
             <div key={m.id} className="row assistant">
-              {m.status === "pending" && previews[m.id]?.text ? (
-                <Reply text={previews[m.id].text} />
+              {m.status === "pending" && previews[m.id] && (previews[m.id].text || previews[m.id].searching) ? (
+                <>
+                  {previews[m.id].text && <Reply text={previews[m.id].text} />}
+                  {previews[m.id].searching && <Searching />}
+                </>
               ) : (
                 <>
                   {m.text && <Reply text={m.text} />}
+                  {m.status === "complete" && m.sources.length > 0 && <Sources sources={m.sources} />}
                   <Status message={m} onRetry={onRetry} />
                 </>
               )}

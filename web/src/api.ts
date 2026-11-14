@@ -12,6 +12,8 @@ export type Model = { id: string; provider: string; note: string };
 
 export type MessageStatus = "pending" | "complete" | "failed" | "cancelled" | "interrupted";
 
+export type Source = { url: string; title: string };
+
 export type Message = {
   id: string;
   chat_id: string;
@@ -20,10 +22,12 @@ export type Message = {
   status: MessageStatus;
   reason: string | null;
   created_at_ms: number;
+  /** sources lists the pages a reply cites from web search. */
+  sources: Source[];
 };
 
 /** Preview is a pending reply's text so far, numbered by its latest preview event. */
-export type Preview = { seq: number; text: string };
+export type Preview = { seq: number; text: string; searching: boolean };
 
 export type PreviewEvent = {
   type: "preview";
@@ -32,6 +36,7 @@ export type PreviewEvent = {
   seq: number;
   restarted: boolean;
   text: string;
+  searching: boolean;
 };
 
 export type ServerEvent =
