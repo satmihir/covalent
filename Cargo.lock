@@ -1093,7 +1093,7 @@ dependencies = [
 [[package]]
 name = "reagent"
 version = "0.1.0"
-source = "git+https://github.com/satmihir/re-agent?rev=0d9d02c2c523fef8bc353022b202f8022f0d8a9b#0d9d02c2c523fef8bc353022b202f8022f0d8a9b"
+source = "git+https://github.com/satmihir/re-agent?rev=daecde22ca31aab8896d95b2843b63352132ea2f#daecde22ca31aab8896d95b2843b63352132ea2f"
 dependencies = [
  "base64 0.22.1",
  "bytes",

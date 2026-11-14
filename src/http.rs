@@ -531,7 +531,7 @@ mod tests {
             .map(|m| m["id"].as_str().unwrap())
             .collect();
         assert!(
-            ids.contains(&"gpt-6.1-luna") && ids.contains(&"gpt-6.1-sol"),
+            ids.contains(&"gpt-6-luna") && ids.contains(&"gpt-6.1-sol"),
             "{models}"
         );
         assert!(!ids.iter().any(|id| id.starts_with("claude-")), "{models}");
@@ -545,8 +545,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        let (_, created) = call(&app, "POST", "/api/chats", json!({"model": "gpt-6.1-luna"})).await;
-        assert_eq!(created["chat"]["model"], "gpt-6.1-luna");
+        let (_, created) = call(&app, "POST", "/api/chats", json!({"model": "gpt-6-luna"})).await;
+        assert_eq!(created["chat"]["model"], "gpt-6-luna");
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
         let (status, switched) = call(
             &app,
