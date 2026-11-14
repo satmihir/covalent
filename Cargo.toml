@@ -1,0 +1,22 @@
+[package]
+name = "covalent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reagent = { git = "https://github.com/satmihir/re-agent", rev = "fb27bedd72869997ee6324b7fd499b909c1f820e" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+panic = "abort"
