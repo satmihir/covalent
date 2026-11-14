@@ -47,3 +47,28 @@ export function MenuIcon() {
     </svg>
   );
 }
+
+export function ChevronIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m6 9 6 6 6-6" {...stroke} strokeWidth={2} />
+    </svg>
+  );
+}
+
+export function CheckIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m5 12 5 5 9-10" {...stroke} strokeWidth={2} />
+    </svg>
+  );
+}
+
+export function ArchiveIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="5" rx="1.5" {...stroke} />
+      <path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4" {...stroke} />
+    </svg>
+  );
+}

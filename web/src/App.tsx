@@ -1,9 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, describe, type Chat, type Message, type ServerEvent } from "./api";
+import {
+  api,
+  describe,
+  type Chat,
+  type Message,
+  type Model,
+  type Preview,
+  type PreviewEvent,
+  type ServerEvent,
+} from "./api";
 import { Composer } from "./Composer";
 import { MenuIcon, NewChatIcon } from "./icons";
+import { ModelPicker } from "./ModelPicker";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./Thread";
+
+type Notice = { text: string; tone: "error" | "info" };
+
+const MODEL_KEY = "covalent.model";
+
+/** Remembered reads this viewer's last model choice for new chats; storage may be unavailable. */
+function remembered(): string | null {
+  try {
+    return localStorage.getItem(MODEL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function remember(model: string) {
+  try {
+    localStorage.setItem(MODEL_KEY, model);
+  } catch {
+    // Remembering the choice is a convenience only.
+  }
+}
 
 function idFromPath(): string | null {
   return /^\/c\/([0-9a-f]{16})$/.exec(location.pathname)?.[1] ?? null;
@@ -38,26 +69,75 @@ export function App() {
   const [chatId, setChatId] = useState<string | null>(idFromPath);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // openChat is the open chat as last read, including an archived one the sidebar omits.
+  const [openChat, setOpenChat] = useState<Chat | null>(null);
+  const [models, setModels] = useState<Model[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [newModel, setNewModel] = useState<string | null>(remembered);
   const current = useRef(chatId);
+  // Previews change many times a second; the ref is applied at once and shown once per frame.
+  const previewRef = useRef<Record<string, Preview>>({});
+  const [previews, setPreviews] = useState<Record<string, Preview>>({});
+  const queued = useRef<PreviewEvent[]>([]);
+  const frame = useRef(0);
 
-  const select = useCallback((id: string | null) => {
-    current.current = id;
-    setChatId(id);
-    setMessages([]);
-    setNotice(null);
-    setSidebarOpen(false);
+  const showPreviews = useCallback((next: Record<string, Preview>) => {
+    previewRef.current = next;
+    setPreviews(next);
   }, []);
 
-  const load = useCallback(async (id: string) => {
-    try {
-      const { messages } = await api.chat(id);
-      if (current.current === id) setMessages(messages);
-    } catch (error) {
-      if (current.current === id) setNotice(describe(error));
+  const select = useCallback(
+    (id: string | null) => {
+      current.current = id;
+      setChatId(id);
+      setMessages([]);
+      setOpenChat(null);
+      showPreviews({});
+      setNotice(null);
+      setSidebarOpen(false);
+    },
+    [showPreviews],
+  );
+
+  const load = useCallback(
+    async (id: string) => {
+      try {
+        const { chat, messages, previews } = await api.chat(id);
+        if (current.current !== id) return;
+        setOpenChat(chat);
+        setMessages(messages);
+        showPreviews(previews);
+      } catch (error) {
+        if (current.current === id) setNotice({ text: describe(error), tone: "error" });
+      }
+    },
+    [showPreviews],
+  );
+
+  /** FlushPreviews applies queued preview events in order; a missed one means reloading the chat. */
+  const flushPreviews = useCallback(() => {
+    frame.current = 0;
+    const next = { ...previewRef.current };
+    let gap = false;
+    for (const event of queued.current.splice(0)) {
+      if (event.chat_id !== current.current) continue;
+      const known = next[event.message_id];
+      const seq = known?.seq ?? 0;
+      if (event.seq <= seq) continue;
+      if (event.seq > seq + 1) {
+        gap = true;
+        continue;
+      }
+      next[event.message_id] = {
+        seq: event.seq,
+        text: event.restarted || !known ? event.text : known.text + event.text,
+      };
     }
-  }, []);
+    showPreviews(next);
+    if (gap && current.current) void load(current.current);
+  }, [load, showPreviews]);
 
   const open = useCallback(
     (id: string | null, push = true) => {
@@ -74,7 +154,13 @@ export function App() {
   }, [load]);
 
   useEffect(() => {
-    api.chats().then(setChats, (error) => setNotice(describe(error)));
+    api.chats().then(setChats, (error) => setNotice({ text: describe(error), tone: "error" }));
+    api.models().then(({ models, default: fallback }) => {
+      setModels(models);
+      setDefaultModel(fallback);
+      // A remembered model this server no longer offers falls back to the default.
+      setNewModel((chosen) => (chosen && models.some((m) => m.id === chosen) ? chosen : null));
+    }, () => {});
     open(idFromPath(), false);
     const onPop = () => open(idFromPath(), false);
     addEventListener("popstate", onPop);
@@ -97,15 +183,28 @@ export function App() {
       if (event.type === "message") {
         if (event.message.chat_id === current.current) {
           setMessages((list) => upsert(list, event.message));
+          // The final reply replaces its preview, including a stopped reply's partial text.
+          const { [event.message.id]: _done, ...rest } = previewRef.current;
+          showPreviews(rest);
         }
+      } else if (event.type === "preview") {
+        queued.current.push(event);
+        if (!frame.current) frame.current = requestAnimationFrame(flushPreviews);
       } else if (event.type === "title") {
         setChats((list) => list.map((c) => (c.id === event.chat_id ? { ...c, title: event.title } : c)));
+      } else if (event.type === "archived") {
+        setChats((list) => list.filter((c) => c.id !== event.chat_id));
+        if (event.chat_id === current.current) void load(event.chat_id);
       } else {
         resync();
       }
     };
-    return () => source.close();
-  }, [resync]);
+    return () => {
+      source.close();
+      cancelAnimationFrame(frame.current);
+      frame.current = 0;
+    };
+  }, [resync, flushPreviews, showPreviews]);
 
   const send = async (text: string) => {
     const requestId = crypto.randomUUID();
@@ -121,7 +220,8 @@ export function App() {
     let id = current.current;
     try {
       if (!id) {
-        const chat = await api.create();
+        const chat = await api.create(newModel);
+        setOpenChat(chat);
         setChats((list) => [chat, ...list]);
         id = chat.id;
         current.current = id;
@@ -135,7 +235,34 @@ export function App() {
       if (current.current !== id) return;
       setMessages((list) => list.filter((m) => !isOptimistic(m)));
       setDraft(text);
-      setNotice(describe(error));
+      setNotice({ text: describe(error), tone: "error" });
+    }
+  };
+
+  const chooseModel = async (model: string) => {
+    if (!chatId) {
+      setNewModel(model);
+      remember(model);
+      return;
+    }
+    try {
+      const chat = await api.switchModel(chatId, model);
+      remember(model);
+      if (current.current === chatId) setOpenChat(chat);
+      setChats((list) => list.map((c) => (c.id === chat.id ? chat : c)));
+    } catch (error) {
+      setNotice({ text: describe(error), tone: "error" });
+    }
+  };
+
+  const archive = async (id: string) => {
+    try {
+      await api.archive(id);
+      setChats((list) => list.filter((c) => c.id !== id));
+      if (current.current === id) open(null);
+      setNotice({ text: `Chat archived. Continue it in a terminal with reagent --resume ${id}`, tone: "info" });
+    } catch (error) {
+      setNotice({ text: describe(error), tone: "error" });
     }
   };
 
@@ -149,13 +276,15 @@ export function App() {
   };
 
   const stop = () => {
-    if (chatId) api.cancel(chatId).catch((error) => setNotice(describe(error)));
+    if (chatId) api.cancel(chatId).catch((error) => setNotice({ text: describe(error), tone: "error" }));
   };
 
   const last = messages[messages.length - 1];
   const running = last?.role === "assistant" && last.status === "pending";
-  const title = chats.find((c) => c.id === chatId)?.title;
+  const title = chats.find((c) => c.id === chatId)?.title ?? openChat?.title;
   const empty = !chatId && messages.length === 0;
+  const archived = openChat?.archived_at_ms != null;
+  const model = chatId ? (openChat?.model ?? null) : (newModel ?? defaultModel);
 
   return (
     <div className="app">
@@ -165,6 +294,7 @@ export function App() {
         open={sidebarOpen}
         onSelect={(id) => open(id)}
         onNew={() => open(null)}
+        onArchive={(id) => void archive(id)}
         onClose={() => setSidebarOpen(false)}
       />
       <main className={`main ${empty ? "empty" : ""}`}>
@@ -172,6 +302,12 @@ export function App() {
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open sidebar">
             <MenuIcon />
           </button>
+          <ModelPicker
+            models={models}
+            value={model}
+            disabled={running || archived || (chatId !== null && !openChat)}
+            onChange={(m) => void chooseModel(m)}
+          />
           <span className="topbar-title">{chatId ? (title ?? "New chat") : ""}</span>
           <button className="icon-button mobile-only" onClick={() => open(null)} aria-label="New chat">
             <NewChatIcon />
@@ -182,25 +318,31 @@ export function App() {
             <h1>What can I help with?</h1>
           </div>
         ) : (
-          <Thread chatId={chatId} messages={messages} onRetry={retry} />
+          <Thread chatId={chatId} messages={messages} previews={previews} onRetry={archived ? undefined : retry} />
         )}
         <div className="composer-dock">
           {notice && (
-            <div className="notice" role="alert">
-              <span>{notice}</span>
+            <div className={`notice ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"}>
+              <span>{notice.text}</span>
               <button onClick={() => setNotice(null)} aria-label="Dismiss">
                 ×
               </button>
             </div>
           )}
-          <Composer
-            value={draft}
-            running={running}
-            focusKey={chatId ?? "new"}
-            onChange={setDraft}
-            onSend={send}
-            onStop={stop}
-          />
+          {archived ? (
+            <p className="archived-note">
+              This chat is archived. Continue it in a terminal with <code>reagent --resume {chatId}</code>
+            </p>
+          ) : (
+            <Composer
+              value={draft}
+              running={running}
+              focusKey={chatId ?? "new"}
+              onChange={setDraft}
+              onSend={send}
+              onStop={stop}
+            />
+          )}
           <p className="footnote">Covalent runs on re:agent. Replies can be wrong, so check what matters.</p>
         </div>
       </main>

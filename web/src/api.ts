@@ -3,7 +3,12 @@ export type Chat = {
   title: string | null;
   created_at_ms: number;
   updated_at_ms: number;
+  /** model is null for chats created before Covalent recorded it. */
+  model: string | null;
+  archived_at_ms: number | null;
 };
+
+export type Model = { id: string; provider: string; note: string };
 
 export type MessageStatus = "pending" | "complete" | "failed" | "cancelled" | "interrupted";
 
@@ -17,9 +22,23 @@ export type Message = {
   created_at_ms: number;
 };
 
+/** Preview is a pending reply's text so far, numbered by its latest preview event. */
+export type Preview = { seq: number; text: string };
+
+export type PreviewEvent = {
+  type: "preview";
+  chat_id: string;
+  message_id: string;
+  seq: number;
+  restarted: boolean;
+  text: string;
+};
+
 export type ServerEvent =
   | { type: "message"; message: Message }
   | { type: "title"; chat_id: string; title: string }
+  | PreviewEvent
+  | { type: "archived"; chat_id: string }
   | { type: "lagged" };
 
 export class ApiError extends Error {
@@ -46,8 +65,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   chats: () => request<{ chats: Chat[] }>("GET", "/api/chats").then((d) => d.chats),
-  chat: (id: string) => request<{ chat: Chat; messages: Message[] }>("GET", `/api/chats/${id}`),
-  create: () => request<{ chat: Chat }>("POST", "/api/chats").then((d) => d.chat),
+  chat: (id: string) =>
+    request<{ chat: Chat; messages: Message[]; previews: Record<string, Preview> }>("GET", `/api/chats/${id}`),
+  models: () => request<{ models: Model[]; default: string | null }>("GET", "/api/models"),
+  create: (model: string | null) =>
+    request<{ chat: Chat }>("POST", "/api/chats", { model }).then((d) => d.chat),
+  switchModel: (id: string, model: string) =>
+    request<{ chat: Chat }>("POST", `/api/chats/${id}/model`, { model }).then((d) => d.chat),
+  archive: (id: string) => request<object>("POST", `/api/chats/${id}/archive`),
   send: (id: string, requestId: string, text: string) =>
     request<{ messages: Message[] }>("POST", `/api/chats/${id}/messages`, {
       request_id: requestId,

@@ -1,5 +1,5 @@
 import type { Chat } from "./api";
-import { Logo, NewChatIcon } from "./icons";
+import { ArchiveIcon, Logo, NewChatIcon } from "./icons";
 
 type Props = {
   chats: Chat[];
@@ -7,6 +7,7 @@ type Props = {
   open: boolean;
   onSelect: (id: string) => void;
   onNew: () => void;
+  onArchive: (id: string) => void;
   onClose: () => void;
 };
 
@@ -21,7 +22,7 @@ function group(ms: number, midnight: number): string {
   return "Older";
 }
 
-export function Sidebar({ chats, currentId, open, onSelect, onNew, onClose }: Props) {
+export function Sidebar({ chats, currentId, open, onSelect, onNew, onArchive, onClose }: Props) {
   const midnight = new Date().setHours(0, 0, 0, 0);
   const groups: { label: string; chats: Chat[] }[] = [];
   for (const chat of chats) {
@@ -56,17 +57,26 @@ export function Sidebar({ chats, currentId, open, onSelect, onNew, onClose }: Pr
             <section key={g.label}>
               <h2>{g.label}</h2>
               {g.chats.map((chat) => (
-                <a
-                  key={chat.id}
-                  href={`/c/${chat.id}`}
-                  className={`chat-link ${chat.id === currentId ? "active" : ""}`}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onSelect(chat.id);
-                  }}
-                >
-                  {chat.title ?? <span className="untitled">New chat</span>}
-                </a>
+                <div key={chat.id} className={`chat-row ${chat.id === currentId ? "active" : ""}`}>
+                  <a
+                    href={`/c/${chat.id}`}
+                    className="chat-link"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onSelect(chat.id);
+                    }}
+                  >
+                    {chat.title ?? <span className="untitled">New chat</span>}
+                  </a>
+                  <button
+                    className="row-action"
+                    onClick={() => onArchive(chat.id)}
+                    title="Archive"
+                    aria-label={`Archive ${chat.title ?? "chat"}`}
+                  >
+                    <ArchiveIcon />
+                  </button>
+                </div>
               ))}
             </section>
           ))}

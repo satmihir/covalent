@@ -42,6 +42,17 @@ re:agent's own settings, such as `REAGENT_OPENAI_BASE_URL`, apply as usual.
 Sessions are saved in re:agent's session store with the origin label
 `covalent`, which keeps them out of the CLI's session picker and `--continue`.
 
+## Models and archiving
+
+The model picker offers the catalog models whose provider has credentials
+here. A new chat uses the model picked before its first message; switching an
+existing chat carries its history over to the new model. A ChatGPT plan does
+not serve every catalog model; a model it refuses fails on the first reply.
+
+Archiving a chat removes it from Covalent and releases its Session, so it can
+be continued in a terminal with `reagent --resume ID` (shown when you archive).
+Covalent does not reopen archived chats.
+
 ## Checking changes
 
 ```bash

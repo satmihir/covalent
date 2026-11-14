@@ -1,12 +1,14 @@
 import { memo, useLayoutEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message } from "./api";
+import type { Message, Preview } from "./api";
 
 type Props = {
   chatId: string | null;
   messages: Message[];
-  onRetry: (message: Message) => void;
+  previews: Record<string, Preview>;
+  /** onRetry is absent when the chat cannot take messages, as when it is archived. */
+  onRetry?: (message: Message) => void;
 };
 
 const Reply = memo(function Reply({ text }: { text: string }) {
@@ -24,7 +26,7 @@ const Reply = memo(function Reply({ text }: { text: string }) {
   );
 });
 
-function Status({ message, onRetry }: { message: Message; onRetry: (m: Message) => void }) {
+function Status({ message, onRetry }: { message: Message; onRetry?: (m: Message) => void }) {
   switch (message.status) {
     case "pending":
       return (
@@ -41,7 +43,7 @@ function Status({ message, onRetry }: { message: Message; onRetry: (m: Message) 
       return (
         <div className="reply-error">
           <span>{message.reason ?? "This reply didn't finish."}</span>
-          <button onClick={() => onRetry(message)}>Retry</button>
+          {onRetry && <button onClick={() => onRetry(message)}>Retry</button>}
         </div>
       );
     default:
@@ -49,7 +51,7 @@ function Status({ message, onRetry }: { message: Message; onRetry: (m: Message) 
   }
 }
 
-export function Thread({ chatId, messages, onRetry }: Props) {
+export function Thread({ chatId, messages, previews, onRetry }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
 
@@ -61,7 +63,7 @@ export function Thread({ chatId, messages, onRetry }: Props) {
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && stuck.current) el.scrollTop = el.scrollHeight;
-  }, [messages, chatId]);
+  }, [messages, previews, chatId]);
 
   return (
     <div
@@ -80,8 +82,14 @@ export function Thread({ chatId, messages, onRetry }: Props) {
             </div>
           ) : (
             <div key={m.id} className="row assistant">
-              {m.text && <Reply text={m.text} />}
-              <Status message={m} onRetry={onRetry} />
+              {m.status === "pending" && previews[m.id]?.text ? (
+                <Reply text={previews[m.id].text} />
+              ) : (
+                <>
+                  {m.text && <Reply text={m.text} />}
+                  <Status message={m} onRetry={onRetry} />
+                </>
+              )}
             </div>
           ),
         )}

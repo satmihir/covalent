@@ -134,10 +134,24 @@ button {
   color: var(--faint);
 }
 
-.chat-link {
-  display: block;
-  padding: 7px 10px;
+.chat-row {
+  display: flex;
+  align-items: center;
   border-radius: 8px;
+}
+
+.chat-row:hover {
+  background: var(--hover);
+}
+
+.chat-row.active {
+  background: var(--active);
+}
+
+.chat-link {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
   color: var(--text);
   text-decoration: none;
   font-size: 14px;
@@ -146,12 +160,35 @@ button {
   text-overflow: ellipsis;
 }
 
-.chat-link:hover {
-  background: var(--hover);
+.row-action {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-right: 3px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
 }
 
-.chat-link.active {
+.row-action:hover {
+  color: var(--text);
   background: var(--active);
+}
+
+.chat-row:hover .row-action,
+.chat-row.active .row-action,
+.row-action:focus-visible {
+  display: inline-flex;
+}
+
+@media (hover: none) {
+  .row-action {
+    display: inline-flex;
+  }
 }
 
 .untitled,
@@ -189,8 +226,8 @@ button {
 .topbar-title {
   flex: 1;
   min-width: 0;
-  font-size: 15px;
-  font-weight: 500;
+  font-size: 14px;
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -529,6 +566,107 @@ button {
   background: none;
   font-size: 18px;
   line-height: 1;
+}
+
+.notice.info {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.archived-note {
+  margin: 0;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+.archived-note code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* Model picker */
+
+.picker {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.picker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.picker-button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.picker-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.picker-button svg {
+  color: var(--muted);
+}
+
+.picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 280px;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.picker-menu button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+}
+
+.picker-menu button:hover {
+  background: var(--hover);
+}
+
+.picker-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.picker-id {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.picker-note {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 /* Narrow screens: the sidebar becomes a drawer. */

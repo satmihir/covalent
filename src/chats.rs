@@ -1,5 +1,8 @@
 use crate::store::{Chat, Message, Store};
-use reagent::session_api::{self, ApiError, PlanMode, RunKind, RunRef, SessionApi, SessionOptions};
+use reagent::session_api::{
+    self, ApiError, CommandState, HistoryMode, PlanMode, RunKind, RunRef, SessionApi,
+    SessionChange, SessionOptions,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,18 +29,16 @@ pub struct Launch {
 
 impl Launch {
     /// Options returns the Session settings for a chat, or for a title request.
-    pub fn options(&self, title: bool) -> SessionOptions {
+    /// A model chosen in the picker runs at its own default effort.
+    pub fn options(&self, title: bool, chosen: Option<&str>) -> SessionOptions {
+        let (model, effort) = match (title, chosen) {
+            (true, _) => (self.title_model.clone(), self.title_effort.clone()),
+            (false, Some(model)) => (Some(model.to_owned()), None),
+            (false, None) => (self.model.clone(), self.effort.clone()),
+        };
         SessionOptions {
-            model: if title {
-                self.title_model.clone()
-            } else {
-                self.model.clone()
-            },
-            reasoning_effort: if title {
-                self.title_effort.clone()
-            } else {
-                self.effort.clone()
-            },
+            model,
+            reasoning_effort: effort,
             scripted: self.scripted.clone(),
             tool_free: true,
             instructions: Some(if title { TITLE_PROMPT } else { PROMPT }.into()),
@@ -57,6 +58,33 @@ pub enum Event {
     Message { message: Message },
     /// Title carries a chat's new title.
     Title { chat_id: String, title: String },
+    /// Archived removes a chat from every open sidebar.
+    Archived { chat_id: String },
+    /// Preview carries reply text the model wrote since the previous preview of that message.
+    Preview {
+        chat_id: String,
+        message_id: String,
+        /// seq numbers a message's previews from one; a client that misses one reloads.
+        seq: u64,
+        /// restarted means the model started its reply over: text replaces what was shown.
+        restarted: bool,
+        text: String,
+    },
+}
+
+/// Model is one catalog model the picker offers.
+#[derive(Clone, Debug, Serialize)]
+pub struct Model {
+    pub id: String,
+    pub provider: String,
+    pub note: String,
+}
+
+/// Preview is a pending reply's text so far, as numbered by its latest preview event.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Preview {
+    pub seq: u64,
+    pub text: String,
 }
 
 /// Failure is a request error with the HTTP status it should produce.
@@ -101,6 +129,8 @@ impl From<rusqlite::Error> for Failure {
 pub struct Chats {
     store: Mutex<Store>,
     live: Mutex<HashMap<String, SessionApi>>,
+    /// previews holds each pending reply's chat ID and text so far, keyed by message ID.
+    previews: Mutex<HashMap<String, (String, Preview)>>,
     events: broadcast::Sender<Event>,
     launch: Launch,
 }
@@ -111,7 +141,9 @@ impl Chats {
         Arc::new(Self {
             store: Mutex::new(store),
             live: Mutex::new(HashMap::new()),
-            events: broadcast::channel(256).0,
+            previews: Mutex::new(HashMap::new()),
+            // Previews arrive many times a second; a reader that still falls behind reloads.
+            events: broadcast::channel(1024).0,
             launch,
         })
     }
@@ -135,13 +167,103 @@ impl Chats {
         Ok((chat, store.messages(chat_id)?))
     }
 
-    /// Create opens a new Session and records it as an untitled chat.
-    pub fn create(&self) -> Result<Chat, Failure> {
-        let api = session_api::open_session(self.launch.options(false))?;
-        let id = api.get_snapshot()?.session.session_id;
-        let chat = self.store.lock().unwrap().create_chat(&id, now_ms())?;
+    /// Previews returns the text so far of a chat's pending replies, keyed by message ID.
+    pub fn previews(&self, chat_id: &str) -> HashMap<String, Preview> {
+        let previews = self.previews.lock().unwrap();
+        previews
+            .iter()
+            .filter(|(_, (chat, _))| chat == chat_id)
+            .map(|(id, (_, preview))| (id.clone(), preview.clone()))
+            .collect()
+    }
+
+    /// Models lists the catalog models whose provider has credentials here, and the default.
+    /// Checking is local: re:agent reads environment keys and its login file, nothing remote.
+    pub fn models(&self) -> (Vec<Model>, Option<String>) {
+        let usable = |model: &str| {
+            let mut config = serde_json::json!({ "model": model });
+            reagent::provider::configure(&mut config)
+                .ok()
+                .map(|_| config["model"].as_str().unwrap_or("").to_owned())
+        };
+        let models = reagent::catalog::models()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| usable(entry["id"].as_str().unwrap_or("")).is_some())
+            .map(|entry| Model {
+                id: entry["id"].as_str().unwrap_or("").into(),
+                provider: entry["provider"].as_str().unwrap_or("").into(),
+                note: entry["note"].as_str().unwrap_or("").into(),
+            })
+            .collect();
+        (models, usable(self.launch.model.as_deref().unwrap_or("")))
+    }
+
+    /// Create opens a new Session, on a chosen catalog model if given, and records an untitled chat.
+    pub fn create(&self, model: Option<&str>) -> Result<Chat, Failure> {
+        if let Some(model) = model {
+            known(model)?;
+        }
+        let api = session_api::open_session(self.launch.options(false, model))?;
+        let snapshot = api.get_snapshot()?;
+        let id = snapshot.session.session_id;
+        let chat = self
+            .store
+            .lock()
+            .unwrap()
+            .create_chat(&id, &snapshot.model, now_ms())?;
         self.live.lock().unwrap().insert(id, api);
         Ok(chat)
+    }
+
+    /// Switch_model moves an idle chat to another catalog model, carrying its history over.
+    pub fn switch_model(&self, chat_id: &str, model: &str) -> Result<Chat, Failure> {
+        known(model)?;
+        let (chat, _) = self.get(chat_id)?;
+        if chat.archived_at_ms.is_some() {
+            return Err(archived());
+        }
+        let api = self.session(chat_id)?;
+        let snapshot = api.get_snapshot()?;
+        if snapshot.model != model {
+            let request = reagent::types::new_id();
+            let change = SessionChange::SwitchModel {
+                model: model.into(),
+                history: HistoryMode::Carry,
+            };
+            api.change_session(&request, snapshot.revision, change)?;
+            let command = api.wait_command(&request)?;
+            if command.state != CommandState::Applied {
+                let reason = command
+                    .reason
+                    .unwrap_or_else(|| "the switch did not apply".into());
+                return Err(Failure::new(409, "not_applied", reason));
+            }
+        }
+        self.store.lock().unwrap().set_model(chat_id, model)?;
+        Ok(self.get(chat_id)?.0)
+    }
+
+    /// Archive hides an idle chat and closes its Session here, so `reagent --resume ID` can open it.
+    pub fn archive(&self, chat_id: &str) -> Result<(), Failure> {
+        let (_, messages) = self.get(chat_id)?;
+        if messages.iter().any(|m| m.status == "pending") {
+            return Err(Failure::new(
+                409,
+                "busy",
+                "Stop the reply before archiving this chat.",
+            ));
+        }
+        let api = self.live.lock().unwrap().remove(chat_id);
+        if let Some(api) = api {
+            api.close()?;
+        }
+        self.store.lock().unwrap().archive(chat_id, now_ms())?;
+        let _ = self.events.send(Event::Archived {
+            chat_id: chat_id.into(),
+        });
+        Ok(())
     }
 
     /// Send admits a user message and returns the chat's messages, ending with the pending reply.
@@ -154,7 +276,10 @@ impl Chats {
         if text.trim().is_empty() {
             return Err(Failure::new(400, "invalid_argument", "message is empty"));
         }
-        let (_, messages) = self.get(chat_id)?;
+        let (chat, messages) = self.get(chat_id)?;
+        if chat.archived_at_ms.is_some() {
+            return Err(archived());
+        }
         // A retry after a restart must not reach re:agent, whose deduplication is per opening.
         if self.store.lock().unwrap().has_message(request_id)? {
             return Ok(messages);
@@ -197,7 +322,8 @@ impl Chats {
         }
         let chats = self.clone();
         let api = self.session(chat_id)?;
-        std::thread::spawn(move || chats.await_reply(&api, &run));
+        let reply_chat = chat_id.to_owned();
+        std::thread::spawn(move || chats.await_reply(&reply_chat, &api, &run));
         if first {
             let chats = self.clone();
             let (chat_id, text) = (chat_id.to_owned(), text.to_owned());
@@ -229,7 +355,18 @@ impl Chats {
         Ok(api)
     }
 
-    fn await_reply(&self, api: &SessionApi, run: &RunRef) {
+    fn await_reply(&self, chat_id: &str, api: &SessionApi, run: &RunRef) {
+        let mut cursor = None;
+        // Any read error leaves the reply to arrive whole from wait_run.
+        while let Ok(page) = api.read_preview(run, cursor, 30_000, None) {
+            if page.finished {
+                break;
+            }
+            cursor = Some(page.next);
+            if page.restarted || !page.text.is_empty() {
+                self.preview(chat_id, &run.run_id, page.restarted, page.text);
+            }
+        }
         let (text, status, reason) = match api.wait_run(run).map(|info| info.result) {
             Ok(Some(result)) => {
                 let text = String::from_utf8_lossy(&result.reply).into_owned();
@@ -254,12 +391,35 @@ impl Chats {
             Err(error) => (String::new(), "failed", Some(error.message)),
         };
         let store = self.store.lock().unwrap();
+        // The final reply replaces the preview; a stopped reply shows none of its partial text.
+        self.previews.lock().unwrap().remove(&run.run_id);
         match store.finish_message(&run.run_id, &text, status, reason.as_deref()) {
             Ok(message) => {
                 let _ = self.events.send(Event::Message { message });
             }
             Err(error) => eprintln!("covalent: record reply {}: {error}", run.run_id),
         }
+    }
+
+    /// Preview records a pending reply's new text and announces it under the same lock,
+    /// so a reload sees either the text or the event that follows it.
+    fn preview(&self, chat_id: &str, message_id: &str, restarted: bool, text: String) {
+        let mut previews = self.previews.lock().unwrap();
+        let (_, preview) = previews
+            .entry(message_id.to_owned())
+            .or_insert_with(|| (chat_id.to_owned(), Preview::default()));
+        preview.seq += 1;
+        if restarted {
+            preview.text.clear();
+        }
+        preview.text.push_str(&text);
+        let _ = self.events.send(Event::Preview {
+            chat_id: chat_id.into(),
+            message_id: message_id.into(),
+            seq: preview.seq,
+            restarted,
+            text,
+        });
     }
 
     fn write_title(&self, chat_id: &str, text: &str) {
@@ -273,6 +433,26 @@ impl Chats {
             title,
         });
     }
+}
+
+fn archived() -> Failure {
+    Failure::new(
+        409,
+        "archived",
+        "This chat is archived. Continue it in a terminal with reagent --resume.",
+    )
+}
+
+/// Known accepts only catalog models, since re:agent takes any name and fails later.
+fn known(model: &str) -> Result<(), Failure> {
+    if reagent::catalog::model_info(model).is_null() {
+        return Err(Failure::new(
+            400,
+            "invalid_argument",
+            format!("{model} is not an offered model"),
+        ));
+    }
+    Ok(())
 }
 
 /// Now_ms is the current Unix time in milliseconds.

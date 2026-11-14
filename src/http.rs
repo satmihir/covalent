@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -17,10 +17,13 @@ use tower_http::services::{ServeDir, ServeFile};
 pub fn router(chats: Arc<Chats>, web: &std::path::Path) -> Router {
     let frontend = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     Router::new()
+        .route("/api/models", get(models))
         .route("/api/chats", get(list).post(create))
         .route("/api/chats/{id}", get(chat))
         .route("/api/chats/{id}/messages", post(send))
         .route("/api/chats/{id}/cancel", post(cancel))
+        .route("/api/chats/{id}/model", post(switch_model))
+        .route("/api/chats/{id}/archive", post(archive))
         .route("/api/events", get(events))
         .fallback_service(frontend)
         .with_state(chats)
@@ -60,14 +63,49 @@ async fn list(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
     blocking(move || Ok(json!({"chats": chats.list()?}))).await
 }
 
-async fn create(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
-    blocking(move || Ok(json!({"chat": chats.create()?}))).await
+async fn models(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
+    blocking(move || {
+        let (models, default) = chats.models();
+        Ok(json!({"models": models, "default": default}))
+    })
+    .await
+}
+
+/// Create takes an optional `{"model": id}`; without one the chat uses Covalent's default.
+async fn create(State(chats): State<Arc<Chats>>, Json(body): Json<Value>) -> impl IntoResponse {
+    blocking(move || {
+        let chat = chats.create(body["model"].as_str())?;
+        Ok(json!({ "chat": chat }))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ModelBody {
+    model: String,
+}
+
+async fn switch_model(
+    State(chats): State<Arc<Chats>>,
+    Path(id): Path<String>,
+    Json(body): Json<ModelBody>,
+) -> impl IntoResponse {
+    blocking(move || Ok(json!({"chat": chats.switch_model(&id, &body.model)?}))).await
+}
+
+async fn archive(State(chats): State<Arc<Chats>>, Path(id): Path<String>) -> impl IntoResponse {
+    blocking(move || {
+        chats.archive(&id)?;
+        Ok(json!({}))
+    })
+    .await
 }
 
 async fn chat(State(chats): State<Arc<Chats>>, Path(id): Path<String>) -> impl IntoResponse {
     blocking(move || {
         let (chat, messages) = chats.get(&id)?;
-        Ok(json!({"chat": chat, "messages": messages}))
+        let previews = chats.previews(&id);
+        Ok(json!({"chat": chat, "messages": messages, "previews": previews}))
     })
     .await
 }
@@ -114,7 +152,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use serde_json::Value;
     use std::time::{Duration, Instant};
     use tower::ServiceExt;
 
@@ -122,7 +159,7 @@ mod tests {
 
     /// Isolated reruns a test in a child process whose HOME is a temporary directory,
     /// because re:agent writes traces below the user's cache directory.
-    fn isolated(name: &str) -> bool {
+    fn isolated(name: &str, env: &[(&str, String)]) -> bool {
         if std::env::var_os(CHILD).is_some() {
             return true;
         }
@@ -132,6 +169,7 @@ mod tests {
             .env(CHILD, "1")
             .env("HOME", home.path())
             .env("XDG_CACHE_HOME", home.path().join("cache"))
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .output()
             .unwrap();
         assert!(
@@ -193,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_chat_records_the_reply_and_a_title() {
-        if !isolated("http::tests::a_new_chat_records_the_reply_and_a_title") {
+        if !isolated("http::tests::a_new_chat_records_the_reply_and_a_title", &[]) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -237,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_retried_send_adds_no_messages() {
-        if !isolated("http::tests::a_retried_send_adds_no_messages") {
+        if !isolated("http::tests::a_retried_send_adds_no_messages", &[]) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -261,7 +299,10 @@ mod tests {
 
     #[tokio::test]
     async fn requests_for_unknown_chats_and_empty_messages_are_rejected() {
-        if !isolated("http::tests::requests_for_unknown_chats_and_empty_messages_are_rejected") {
+        if !isolated(
+            "http::tests::requests_for_unknown_chats_and_empty_messages_are_rejected",
+            &[],
+        ) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -281,5 +322,242 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// Stream_provider answers Responses requests on a loopback port: title requests at once,
+    /// and the chat reply as "Sourdough", then " rises." once the release file exists.
+    fn stream_provider(release: std::path::PathBuf) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let release = release.clone();
+                std::thread::spawn(move || {
+                    let mut request = vec![];
+                    let mut byte = [0];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                    }
+                    let length: usize = String::from_utf8_lossy(&request)
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let body: Value = serde_json::from_slice(&body).unwrap();
+                    let title = body["instructions"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("titles");
+                    if !write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").is_ok() {
+                        return;
+                    }
+                    let mut send = |event: Value| {
+                        let kind = event["type"].as_str().unwrap().to_owned();
+                        write!(stream, "event: {kind}\ndata: {event}\n\n").is_ok()
+                            && stream.flush().is_ok()
+                    };
+                    let done = |text: &str| {
+                        let output = json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]);
+                        json!({"type":"response.completed","response":{"id":"fixture","status":"completed","model":"gpt-6.1-sol","output":output,"usage":{"input_tokens":5,"output_tokens":2}}})
+                    };
+                    let delta = |text: &str| json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":text});
+                    if title {
+                        send(done("Baking Bread"));
+                        return;
+                    }
+                    send(delta("Sourdough"));
+                    while !release.exists() {
+                        if !send(json!({"type":"keepalive"})) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    send(delta(" rises."));
+                    send(done("Sourdough rises."));
+                });
+            }
+        });
+        endpoint
+    }
+
+    #[tokio::test]
+    async fn a_pending_reply_shows_its_text_so_far_and_then_the_final_reply() {
+        let release = tempfile::tempdir().unwrap();
+        let release_file = release.path().join("release");
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release_file.clone()),
+            ),
+            ("COVALENT_TEST_RELEASE", release_file.display().to_string()),
+        ];
+        if !isolated(
+            "http::tests::a_pending_reply_shows_its_text_so_far_and_then_the_final_reply",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let launch = Launch {
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some("low".into()),
+            ..Launch::default()
+        };
+        let chats = Chats::new(
+            Store::open(&dir.path().join("covalent.db")).unwrap(),
+            launch,
+        );
+        let app = router(chats.clone(), &dir.path().join("web"));
+        let mut events = chats.subscribe();
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        let (_, sent) = call(
+            &app,
+            "POST",
+            &format!("/api/chats/{id}/messages"),
+            json!({"request_id": "r1", "text": "Tell me about bread."}),
+        )
+        .await;
+        let reply = sent["messages"][1]["id"].as_str().unwrap().to_owned();
+
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+            if body["previews"][&reply]["text"] == "Sourdough" {
+                assert_eq!(body["messages"][1]["status"], "pending");
+                assert_eq!(body["previews"][&reply]["seq"], 1);
+                break;
+            }
+            assert!(Instant::now() < end, "no preview: {body}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::write(std::env::var("COVALENT_TEST_RELEASE").unwrap(), b"").unwrap();
+        let body = settled(&app, &id).await;
+        assert_eq!(body["messages"][1]["text"], "Sourdough rises.");
+        assert_eq!(body["previews"], json!({}));
+
+        let mut previews = vec![];
+        while let Ok(event) = events.try_recv() {
+            let event = serde_json::to_value(event).unwrap();
+            if event["type"] == "preview" {
+                previews.push((
+                    event["seq"].as_u64().unwrap(),
+                    event["text"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        let text: String = previews.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(text, "Sourdough rises.");
+        assert!(previews
+            .iter()
+            .enumerate()
+            .all(|(i, (seq, _))| *seq == i as u64 + 1));
+    }
+
+    #[tokio::test]
+    async fn an_archived_chat_leaves_the_list_and_refuses_new_messages() {
+        if !isolated(
+            "http::tests::an_archived_chat_leaves_the_list_and_refuses_new_messages",
+            &[],
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app(dir.path(), &["first", "unused"]);
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        let send = json!({"request_id": "r1", "text": "hello"});
+        call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
+        settled(&app, &id).await;
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/api/chats/{id}/archive"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, listed) = call(&app, "GET", "/api/chats", Value::Null).await;
+        assert_eq!(listed["chats"], json!([]));
+        let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+        assert!(body["chat"]["archived_at_ms"].is_i64(), "{body}");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        let again = json!({"request_id": "r2", "text": "more"});
+        let (status, body) = call(&app, "POST", &format!("/api/chats/{id}/messages"), again).await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::CONFLICT, json!("archived"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_picker_offers_credentialed_models_and_switches_an_idle_chat() {
+        let release = tempfile::tempdir().unwrap();
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            ("ANTHROPIC_API_KEY", String::new()),
+            ("REAGENT_MODEL", String::new()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release.path().join("unused")),
+            ),
+        ];
+        if !isolated(
+            "http::tests::the_picker_offers_credentialed_models_and_switches_an_idle_chat",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let chats = Chats::new(
+            Store::open(&dir.path().join("covalent.db")).unwrap(),
+            Launch::default(),
+        );
+        let app = router(chats, &dir.path().join("web"));
+        let (_, models) = call(&app, "GET", "/api/models", Value::Null).await;
+        let ids: Vec<_> = models["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&"gpt-6.1-luna") && ids.contains(&"gpt-6.1-sol"),
+            "{models}"
+        );
+        assert!(!ids.iter().any(|id| id.starts_with("claude-")), "{models}");
+        assert_eq!(models["default"], "gpt-6.1-sol");
+
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/chats",
+            json!({"model": "no-such-model"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (_, created) = call(&app, "POST", "/api/chats", json!({"model": "gpt-6.1-luna"})).await;
+        assert_eq!(created["chat"]["model"], "gpt-6.1-luna");
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        let (status, switched) = call(
+            &app,
+            "POST",
+            &format!("/api/chats/{id}/model"),
+            json!({"model": "gpt-6.1-sol"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{switched}");
+        assert_eq!(switched["chat"]["model"], "gpt-6.1-sol");
+        let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+        assert_eq!(body["chat"]["model"], "gpt-6.1-sol");
     }
 }

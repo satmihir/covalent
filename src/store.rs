@@ -9,6 +9,10 @@ pub struct Chat {
     pub title: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// model is the Session's model as last opened or switched here; unknown for older chats.
+    pub model: Option<String>,
+    /// archived_at_ms hides the chat from Covalent; its Session stays resumable from the CLI.
+    pub archived_at_ms: Option<i64>,
 }
 
 /// Message is one turn as the thread shows it, independent of the model's context.
@@ -51,6 +55,16 @@ impl Store {
                 created_at_ms INTEGER NOT NULL
             );",
         )?;
+        // Columns added after the first release; SQLite has no ADD COLUMN IF NOT EXISTS.
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('chats')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (column, kind) in [("model", "TEXT"), ("archived_at_ms", "INTEGER")] {
+            if !columns.iter().any(|c| c == column) {
+                conn.execute_batch(&format!("ALTER TABLE chats ADD COLUMN {column} {kind}"))?;
+            }
+        }
         // re:agent never restarts work that was in flight, so neither does the display.
         conn.execute(
             "UPDATE messages SET status = 'interrupted',
@@ -61,11 +75,12 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// Chats lists every chat, most recently active first.
+    /// Chats lists every chat not archived, most recently active first.
     pub fn chats(&self) -> rusqlite::Result<Vec<Chat>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT * FROM chats ORDER BY updated_at_ms DESC, rowid DESC")?;
+        let mut statement = self.conn.prepare(
+            "SELECT * FROM chats WHERE archived_at_ms IS NULL
+             ORDER BY updated_at_ms DESC, rowid DESC",
+        )?;
         let rows = statement.query_map([], chat)?;
         rows.collect()
     }
@@ -78,17 +93,37 @@ impl Store {
     }
 
     /// Create_chat records a new untitled chat.
-    pub fn create_chat(&self, id: &str, now_ms: i64) -> rusqlite::Result<Chat> {
+    pub fn create_chat(&self, id: &str, model: &str, now_ms: i64) -> rusqlite::Result<Chat> {
         self.conn.execute(
-            "INSERT INTO chats (id, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?2)",
-            params![id, now_ms],
+            "INSERT INTO chats (id, model, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?3)",
+            params![id, model, now_ms],
         )?;
         Ok(Chat {
             id: id.into(),
             title: None,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
+            model: Some(model.into()),
+            archived_at_ms: None,
         })
+    }
+
+    /// Set_model records the model a chat's Session switched to.
+    pub fn set_model(&self, chat_id: &str, model: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET model = ?2 WHERE id = ?1",
+            params![chat_id, model],
+        )?;
+        Ok(())
+    }
+
+    /// Archive hides a chat from the list without touching its messages or its Session.
+    pub fn archive(&self, chat_id: &str, now_ms: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET archived_at_ms = ?2 WHERE id = ?1",
+            params![chat_id, now_ms],
+        )?;
+        Ok(())
     }
 
     /// Set_title replaces a chat's title.
@@ -162,6 +197,8 @@ fn chat(row: &Row) -> rusqlite::Result<Chat> {
         title: row.get("title")?,
         created_at_ms: row.get("created_at_ms")?,
         updated_at_ms: row.get("updated_at_ms")?,
+        model: row.get("model")?,
+        archived_at_ms: row.get("archived_at_ms")?,
     })
 }
 
@@ -199,7 +236,7 @@ mod tests {
         let path = dir.path().join("covalent.db");
         {
             let store = Store::open(&path).unwrap();
-            store.create_chat("c", 1).unwrap();
+            store.create_chat("c", "m", 1).unwrap();
             store.insert_message(&reply("pending", "pending")).unwrap();
             store.insert_message(&reply("done", "complete")).unwrap();
         }
@@ -223,13 +260,39 @@ mod tests {
     fn chats_are_listed_by_latest_activity() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("covalent.db")).unwrap();
-        store.create_chat("older", 1).unwrap();
-        store.create_chat("newer", 2).unwrap();
+        store.create_chat("older", "m", 1).unwrap();
+        store.create_chat("newer", "m", 2).unwrap();
         let mut m = reply("m", "complete");
         m.chat_id = "older".into();
         m.created_at_ms = 3;
         store.insert_message(&m).unwrap();
         let ids: Vec<_> = store.chats().unwrap().into_iter().map(|c| c.id).collect();
         assert_eq!(ids, ["older", "newer"]);
+        store.archive("older", 4).unwrap();
+        let ids: Vec<_> = store.chats().unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["newer"]);
+        assert_eq!(
+            store.chat("older").unwrap().unwrap().archived_at_ms,
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn a_store_from_before_models_and_archiving_gains_both_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("covalent.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE chats (id TEXT PRIMARY KEY, title TEXT,
+                    created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+                 INSERT INTO chats VALUES ('old', 'Old chat', 1, 1);",
+            )
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        let old = store.chat("old").unwrap().unwrap();
+        assert_eq!((old.model, old.archived_at_ms), (None, None));
+        drop(store);
+        Store::open(&path).unwrap();
     }
 }

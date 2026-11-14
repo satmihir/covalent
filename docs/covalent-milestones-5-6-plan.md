@@ -10,6 +10,12 @@ Covalent pins it. The same one-sentence question
 now costs 179 input tokens with no tools and 588 bytes of Covalent's prompt.
 Open points 1, 2 and 5 were settled as recommended.
 
+Milestone 6 is built locally against an unmerged re:agent branch
+(`covalent/reply-preview`), with open points 3 and 4 settled as recommended.
+As built, Covalent numbers its preview events per message (`seq`) instead of
+sending offsets, so a client that misses one simply reloads the chat. Live, a
+ChatGPT-plan reply produced about ten preview events a second.
+
 Milestone 5 makes a chat a real chat Session: no tools, no workspace, and a
 prompt Covalent writes. Milestone 6 makes the reply appear as the model writes
 it. They do not depend on each other. Each is one re:agent pull request,
