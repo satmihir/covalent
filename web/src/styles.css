@@ -284,7 +284,27 @@ button {
 
 .row.user {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+/* A prompt's copy button appears on hover, or always where there is no hover. */
+.user-actions {
+  display: flex;
+  margin: 4px -6px 0 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.row.user:hover .user-actions,
+.user-actions:focus-within {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .user-actions {
+    opacity: 1;
+  }
 }
 
 .bubble {

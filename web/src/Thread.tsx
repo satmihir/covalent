@@ -2,7 +2,17 @@ import { memo, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Action, Image, Message, Preview, Source } from "./api";
-import { CheckIcon, ChevronIcon, CloseIcon, DownloadIcon, GlobeIcon, ImageIcon, SpeakerIcon, StopIcon } from "./icons";
+import {
+  CheckIcon,
+  ChevronIcon,
+  CloseIcon,
+  CopyIcon,
+  DownloadIcon,
+  GlobeIcon,
+  ImageIcon,
+  SpeakerIcon,
+  StopIcon,
+} from "./icons";
 
 type Props = {
   chatId: string | null;
@@ -213,14 +223,29 @@ function Status({ message, onRetry }: { message: Message; onRetry?: (m: Message)
   }
 }
 
+/** Copy puts a message's text on the clipboard, a reply as its Markdown, and says so briefly. */
+function Copy({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }, () => {});
+  };
+  const label = copied ? "Copied" : "Copy";
+  return (
+    <button className="action-button" onClick={copy} aria-label={label} title={label}>
+      {copied ? <CheckIcon /> : <CopyIcon />}
+    </button>
+  );
+}
+
 function ReadAloud({ active, onClick }: { active: boolean; onClick: () => void }) {
   const label = active ? "Stop reading" : "Read aloud";
   return (
-    <div className="reply-actions">
-      <button className={`action-button ${active ? "active" : ""}`} onClick={onClick} aria-label={label} title={label}>
-        {active ? <StopIcon /> : <SpeakerIcon />}
-      </button>
-    </div>
+    <button className={`action-button ${active ? "active" : ""}`} onClick={onClick} aria-label={label} title={label}>
+      {active ? <StopIcon /> : <SpeakerIcon />}
+    </button>
   );
 }
 
@@ -252,6 +277,9 @@ export function Thread({ chatId, messages, previews, fileUrl, onOpenFile, onRetr
           m.role === "user" ? (
             <div key={m.id} className="row user">
               <div className="bubble">{m.text}</div>
+              <div className="user-actions">
+                <Copy text={m.text} />
+              </div>
             </div>
           ) : (
             <div key={m.id} className="row assistant">
@@ -270,8 +298,11 @@ export function Thread({ chatId, messages, previews, fileUrl, onOpenFile, onRetr
                   {m.images.length > 0 && <Images images={m.images} fileUrl={fileUrl} />}
                   {m.text && <Reply text={m.text} />}
                   {m.status === "complete" && m.sources.length > 0 && <Sources sources={m.sources} />}
-                  {onSpeak && m.status === "complete" && m.text && (
-                    <ReadAloud active={speaking === m.id} onClick={() => onSpeak(m)} />
+                  {m.status === "complete" && m.text && (
+                    <div className="reply-actions">
+                      <Copy text={m.text} />
+                      {onSpeak && <ReadAloud active={speaking === m.id} onClick={() => onSpeak(m)} />}
+                    </div>
                   )}
                   <Status message={m} onRetry={onRetry} />
                 </>

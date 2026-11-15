@@ -157,3 +157,12 @@ export function BackIcon() {
     </svg>
   );
 }
+
+export function CopyIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="8.5" y="8.5" width="11" height="11" rx="2.5" {...stroke} />
+      <path d="M15.5 5.5v-.5a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h.5" {...stroke} />
+    </svg>
+  );
+}
