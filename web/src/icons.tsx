@@ -123,3 +123,21 @@ export function VoiceIcon() {
     </svg>
   );
 }
+
+export function ImageIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" {...stroke} />
+      <circle cx="9" cy="10" r="1.6" {...stroke} />
+      <path d="m5 18 4.5-4.5 3 3 2.5-2.5 4 4" {...stroke} />
+    </svg>
+  );
+}
+
+export function DownloadIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v11M7.5 11l4.5 4.5 4.5-4.5M5 19.5h14" {...stroke} strokeWidth={2} />
+    </svg>
+  );
+}

@@ -1,8 +1,8 @@
 import { memo, useLayoutEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message, Preview, Source } from "./api";
-import { GlobeIcon, SpeakerIcon, StopIcon } from "./icons";
+import { api, type Image, type Message, type Preview, type Source } from "./api";
+import { DownloadIcon, GlobeIcon, ImageIcon, SpeakerIcon, StopIcon } from "./icons";
 
 type Props = {
   chatId: string | null;
@@ -63,6 +63,44 @@ function Searching() {
     <div className="searching" role="status">
       <GlobeIcon />
       <span>Searching the web…</span>
+    </div>
+  );
+}
+
+/** Images shows a reply's pictures at their own proportions, so loading does not move the page. */
+function Images({ images }: { images: Image[] }) {
+  return (
+    <div className="images">
+      {images.map((image) => {
+        const url = api.imageUrl(image.name);
+        return (
+          <figure
+            key={image.name}
+            className="image"
+            style={{
+              aspectRatio: `${image.width} / ${image.height}`,
+              // A tall image is limited by the window's height, so its box narrows with it.
+              maxWidth: `min(480px, calc(70vh * ${image.width / image.height}))`,
+            }}
+          >
+            <a href={url} target="_blank" rel="noreferrer" aria-label="Open image at full size">
+              <img src={url} width={image.width} height={image.height} alt="Generated image" loading="lazy" />
+            </a>
+            <a className="image-download" href={url} download={image.name} aria-label="Download image" title="Download">
+              <DownloadIcon />
+            </a>
+          </figure>
+        );
+      })}
+    </div>
+  );
+}
+
+function Generating() {
+  return (
+    <div className="image-tile" role="status">
+      <ImageIcon />
+      <span>Creating image…</span>
     </div>
   );
 }
@@ -134,13 +172,15 @@ export function Thread({ chatId, messages, previews, onRetry, onSpeak, speaking 
             </div>
           ) : (
             <div key={m.id} className="row assistant">
-              {m.status === "pending" && previews[m.id] && (previews[m.id].text || previews[m.id].searching) ? (
+              {m.status === "pending" && previews[m.id] && (previews[m.id].text || previews[m.id].searching || previews[m.id].generating) ? (
                 <>
+                  {previews[m.id].generating && <Generating />}
                   {previews[m.id].text && <Reply text={previews[m.id].text} />}
                   {previews[m.id].searching && <Searching />}
                 </>
               ) : (
                 <>
+                  {m.images.length > 0 && <Images images={m.images} />}
                   {m.text && <Reply text={m.text} />}
                   {m.status === "complete" && m.sources.length > 0 && <Sources sources={m.sources} />}
                   {onSpeak && m.status === "complete" && m.text && (

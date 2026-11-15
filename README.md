@@ -80,6 +80,21 @@ valid, chats still use the plan, but if the login lapses re:agent falls back to
 the key without saying so. To make that an error instead, start Covalent with
 `REAGENT_OPENAI_AUTH=chatgpt`.
 
+## Images
+
+With `OPENAI_API_KEY` set where Covalent starts, new chats can make images. Ask
+for a picture and the chat model calls re:agent's `generate_image` tool; a
+"Creating image…" tile shows while it works, usually 15 to 25 seconds, and the
+image then sits above a short reply. Click it to open it at full size, or use
+the download button. It works in OpenAI and Claude chats alike; an OpenAI model
+also sees a small copy of what it made, a Claude model is only told it was made.
+
+Images are saved in `images/` in Covalent's data folder and are never deleted.
+Each one costs about four cents on the API key, apart from any ChatGPT plan,
+and a reply can make at most four. The image prompt goes to OpenAI, also in
+chats whose model is Claude. Chats created before this keep their saved
+setting and make none.
+
 ## Models and archiving
 
 The model picker offers the catalog models whose provider has credentials

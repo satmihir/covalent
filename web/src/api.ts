@@ -14,6 +14,9 @@ export type MessageStatus = "pending" | "complete" | "failed" | "cancelled" | "i
 
 export type Source = { url: string; title: string };
 
+/** Image is a picture a reply made, served at `/api/images/{name}`. */
+export type Image = { name: string; width: number; height: number };
+
 export type Message = {
   id: string;
   chat_id: string;
@@ -24,10 +27,12 @@ export type Message = {
   created_at_ms: number;
   /** sources lists the pages a reply cites from web search. */
   sources: Source[];
+  /** images lists the pictures a reply made. */
+  images: Image[];
 };
 
 /** Preview is a pending reply's text so far, numbered by its latest preview event. */
-export type Preview = { seq: number; text: string; searching: boolean };
+export type Preview = { seq: number; text: string; searching: boolean; generating: boolean };
 
 export type PreviewEvent = {
   type: "preview";
@@ -37,6 +42,7 @@ export type PreviewEvent = {
   restarted: boolean;
   text: string;
   searching: boolean;
+  generating: boolean;
 };
 
 export type ServerEvent =
@@ -100,6 +106,7 @@ export const api = {
     }
     return data.text as string;
   },
+  imageUrl: (name: string) => `/api/images/${name}`,
   speechUrl: (chatId: string, messageId: string) => `/api/chats/${chatId}/messages/${messageId}/speech`,
 };
 

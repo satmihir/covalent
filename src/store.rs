@@ -1,6 +1,6 @@
 use reagent::session_api::Source;
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Chat is one conversation as the sidebar lists it; its id is the re:agent Session ID.
@@ -14,6 +14,14 @@ pub struct Chat {
     pub model: Option<String>,
     /// archived_at_ms hides the chat from Covalent; its Session stays resumable from the CLI.
     pub archived_at_ms: Option<i64>,
+}
+
+/// Image is one picture a reply made, served by its file name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Image {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Message is one turn as the thread shows it, independent of the model's context.
@@ -30,6 +38,8 @@ pub struct Message {
     pub created_at_ms: i64,
     /// sources lists the pages a reply cites from web search, in first-cited order.
     pub sources: Vec<Source>,
+    /// images lists the pictures a reply made, in the order it made them.
+    pub images: Vec<Image>,
 }
 
 /// Store keeps chats and their displayed messages in one SQLite file.
@@ -63,6 +73,7 @@ impl Store {
             ("chats", "model", "TEXT"),
             ("chats", "archived_at_ms", "INTEGER"),
             ("messages", "sources", "TEXT"),
+            ("messages", "images", "TEXT"),
         ] {
             let columns: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
@@ -158,6 +169,19 @@ impl Store {
             .optional()
     }
 
+    /// Has_image reports whether some message records an image by this file name.
+    pub fn has_image(&self, name: &str) -> rusqlite::Result<bool> {
+        let recorded = serde_json::to_string(name).unwrap();
+        self.conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE instr(images, ?1) > 0 LIMIT 1",
+                [format!("\"name\":{recorded}")],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|found| found.is_some())
+    }
+
     /// Has_message reports whether a message ID is already used, which makes sends retryable.
     pub fn has_message(&self, id: &str) -> rusqlite::Result<bool> {
         self.conn
@@ -196,11 +220,14 @@ impl Store {
         status: &str,
         reason: Option<&str>,
         sources: &[Source],
+        images: &[Image],
     ) -> rusqlite::Result<Message> {
         let sources = (!sources.is_empty()).then(|| serde_json::to_string(sources).unwrap());
+        let images = (!images.is_empty()).then(|| serde_json::to_string(images).unwrap());
         self.conn.execute(
-            "UPDATE messages SET text = ?2, status = ?3, reason = ?4, sources = ?5 WHERE id = ?1",
-            params![id, text, status, reason, sources],
+            "UPDATE messages SET text = ?2, status = ?3, reason = ?4, sources = ?5, images = ?6
+             WHERE id = ?1",
+            params![id, text, status, reason, sources, images],
         )?;
         self.conn
             .query_row("SELECT * FROM messages WHERE id = ?1", [id], message)
@@ -231,6 +258,10 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
             .get::<_, Option<String>>("sources")?
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default(),
+        images: row
+            .get::<_, Option<String>>("images")?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -248,6 +279,7 @@ mod tests {
             reason: None,
             created_at_ms: 1,
             sources: vec![],
+            images: vec![],
         }
     }
 

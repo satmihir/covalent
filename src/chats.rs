@@ -1,4 +1,4 @@
-use crate::store::{Chat, Message, Store};
+use crate::store::{Chat, Image, Message, Store};
 use reagent::session_api::{
     self, ApiError, CommandState, HistoryMode, PlanMode, PreviewCursor, PreviewPage, RunKind,
     RunRef, SessionApi, SessionChange, SessionOptions,
@@ -16,6 +16,16 @@ const PROMPT: &str = include_str!("prompt.txt");
 const TITLE_PROMPT: &str = "You write titles for chats. Given the first message of a chat, reply \
     with a title of at most six words and nothing else: no quotes, no trailing punctuation.";
 
+/// IMAGES is added to a chat's instructions when it can make images.
+const IMAGES: &str = "\n\nYou can create images with the generate_image tool. Use it only when \
+    the user asks for a picture, drawing or illustration, and write the tool's prompt as a full \
+    description of the image. The image is shown to the user right above your reply, so answer \
+    with one short sentence: do not describe the image at length, link to it, name a file, or \
+    repeat the prompt.";
+
+/// MAX_IMAGE_CALLS bounds what one reply can cost in image generations.
+const MAX_IMAGE_CALLS: u64 = 4;
+
 /// SPOKEN is the note a dictated turn carries, so the reply suits being heard.
 const SPOKEN: &str = "The user said this message aloud in voice mode, so it may contain \
     transcription errors; answer what they most likely meant. Your reply will be read aloud: \
@@ -31,6 +41,8 @@ pub struct Launch {
     pub title_effort: Option<String>,
     /// scripted replaces inference with a re:agent response script, for offline tests.
     pub scripted: Option<PathBuf>,
+    /// images is the folder new chats save generated images in; without it they make none.
+    pub images: Option<PathBuf>,
 }
 
 impl Launch {
@@ -42,18 +54,30 @@ impl Launch {
             (false, Some(model)) => (Some(model.to_owned()), None),
             (false, None) => (self.model.clone(), self.effort.clone()),
         };
-        SessionOptions {
+        let images = self.images.as_ref().filter(|_| !title);
+        let instructions = match (title, images) {
+            (true, _) => TITLE_PROMPT.to_owned(),
+            (false, Some(_)) => format!("{}{IMAGES}", PROMPT.trim_end()),
+            (false, None) => PROMPT.to_owned(),
+        };
+        let mut options = SessionOptions {
             model,
             reasoning_effort: effort,
             scripted: self.scripted.clone(),
             tool_free: true,
-            instructions: Some(if title { TITLE_PROMPT } else { PROMPT }.into()),
+            instructions: Some(instructions),
             agents: false,
             checkpoint: !title,
             web_search: !title,
             origin: Some("covalent".into()),
             ..SessionOptions::default()
+        };
+        if let Some(folder) = images {
+            options.image_generation = true;
+            options.workspace = folder.clone();
+            options.max_tool_calls = MAX_IMAGE_CALLS;
         }
+        options
     }
 }
 
@@ -78,6 +102,8 @@ pub enum Event {
         text: String,
         /// searching is true while the provider runs a web search for this reply.
         searching: bool,
+        /// generating is true from when this reply starts making an image until it finishes.
+        generating: bool,
     },
 }
 
@@ -95,6 +121,7 @@ pub struct Preview {
     pub seq: u64,
     pub text: String,
     pub searching: bool,
+    pub generating: bool,
 }
 
 /// Reply is an assistant message's text as speech follows it.
@@ -363,6 +390,7 @@ impl Chats {
             reason: None,
             created_at_ms: now,
             sources: vec![],
+            images: vec![],
         };
         let reply = Message {
             id: run.run_id.clone(),
@@ -418,17 +446,28 @@ impl Chats {
             if page.finished {
                 break;
             }
-            let searched = cursor.is_some_and(|c: PreviewCursor| c.searching) != page.searching;
+            let before = cursor.map_or((false, false), |c: PreviewCursor| {
+                (c.searching, c.generating)
+            });
+            let busy = before != (page.searching, page.generating);
             cursor = Some(page.next);
-            if page.restarted || !page.text.is_empty() || searched {
+            if page.restarted || !page.text.is_empty() || busy {
                 self.preview(chat_id, &run.run_id, &page);
             }
         }
         let mut sources = Vec::new();
+        let mut images = Vec::new();
         let (text, status, reason) = match api.wait_run(run).map(|info| info.result) {
             Ok(Some(result)) => {
                 let text = String::from_utf8_lossy(&result.reply).into_owned();
                 sources = result.sources;
+                // An image that was saved is shown however the reply ended: it exists.
+                images = result
+                    .effects
+                    .iter()
+                    .filter(|e| e.tool == "generate_image" && e.operation == "create")
+                    .filter_map(|e| self.saved_image(std::str::from_utf8(&e.path).ok()?))
+                    .collect();
                 match result.status.as_str() {
                     "completed" | "refused" => (text, "complete", None),
                     "cancelled" => (text, "cancelled", None),
@@ -452,7 +491,14 @@ impl Chats {
         let store = self.store.lock().unwrap();
         // The final reply replaces the preview; a stopped reply shows none of its partial text.
         self.previews.lock().unwrap().remove(&run.run_id);
-        match store.finish_message(&run.run_id, &text, status, reason.as_deref(), &sources) {
+        match store.finish_message(
+            &run.run_id,
+            &text,
+            status,
+            reason.as_deref(),
+            &sources,
+            &images,
+        ) {
             Ok(message) => {
                 let _ = self.events.send(Event::Message { message });
             }
@@ -473,6 +519,8 @@ impl Chats {
         }
         preview.text.push_str(&page.text);
         preview.searching = page.searching;
+        // The image itself arrives with the finished reply, so its placeholder stays until then.
+        preview.generating |= page.generating;
         let _ = self.events.send(Event::Preview {
             chat_id: chat_id.into(),
             message_id: message_id.into(),
@@ -480,7 +528,31 @@ impl Chats {
             restarted: page.restarted,
             text: page.text.clone(),
             searching: page.searching,
+            generating: preview.generating,
         });
+    }
+
+    /// Saved_image describes a generated file by the size in its PNG header.
+    fn saved_image(&self, name: &str) -> Option<Image> {
+        let bytes = std::fs::read(self.launch.images.as_ref()?.join(image_name(name)?)).ok()?;
+        let size = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+        let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.get(12..16) == Some(b"IHDR");
+        Some(Image {
+            name: name.to_owned(),
+            width: size(16).filter(|_| png)?,
+            height: size(20)?,
+        })
+    }
+
+    /// Image returns a generated image's bytes, only for a name some message records.
+    pub fn image(&self, name: &str) -> Result<Vec<u8>, Failure> {
+        let missing = || Failure::new(404, "not_found", "no such image");
+        let name = image_name(name).ok_or_else(missing)?;
+        if !self.store.lock().unwrap().has_image(name)? {
+            return Err(missing());
+        }
+        let folder = self.launch.images.as_ref().ok_or_else(missing)?;
+        std::fs::read(folder.join(name)).map_err(|_| missing())
     }
 
     fn write_title(&self, chat_id: &str, text: &str) {
@@ -494,6 +566,12 @@ impl Chats {
             title,
         });
     }
+}
+
+/// Image_name accepts only the file names re:agent gives generated images.
+fn image_name(name: &str) -> Option<&str> {
+    let id = name.strip_prefix("image-")?.strip_suffix(".png")?;
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(name)
 }
 
 fn archived() -> Failure {

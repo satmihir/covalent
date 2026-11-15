@@ -41,6 +41,7 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
             post(transcribe).layer(DefaultBodyLimit::max(RECORDING)),
         )
         .route("/api/chats/{id}/messages/{message}/speech", get(speak))
+        .route("/api/images/{name}", get(image))
         .route("/api/models", get(models))
         .route("/api/chats", get(list).post(create))
         .route("/api/chats/{id}", get(chat))
@@ -220,6 +221,24 @@ async fn speak(
         (header::CACHE_CONTROL, "no-store".to_owned()),
     ];
     Ok((headers, Body::from_stream(ReceiverStream::new(audio))).into_response())
+}
+
+/// Image serves one generated image; its name never changes what it holds, so browsers keep it.
+async fn image(
+    State(chats): State<Arc<Chats>>,
+    Path(name): Path<String>,
+) -> Result<Response, Failure> {
+    let bytes = tokio::task::spawn_blocking(move || chats.image(&name))
+        .await
+        .map_err(|e| Failure::new(500, "internal", format!("request worker failed: {e}")))??;
+    let headers = [
+        (header::CONTENT_TYPE, "image/png"),
+        (
+            header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable",
+        ),
+    ];
+    Ok((headers, bytes).into_response())
 }
 
 /// Events streams every chat's changes; a client that falls behind reloads what it shows.
@@ -422,10 +441,16 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
+    /// PIXEL is a one-pixel PNG, base64-encoded as the Images API returns images.
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
     /// Stream_provider answers Responses requests on a loopback port: title requests at once,
     /// and the chat reply as a web search that ends once the `searched` file next to the release
     /// file exists, then "Sourdough", then " rises." once the release file exists. Each chat
     /// request's input is appended as one line to `requests.log` next to the release file.
+    /// A chat message containing "draw" is answered with a generate_image call, then with
+    /// "Here is your boat." once the tool's result comes back; the same port plays the
+    /// Images API, answering with a one-pixel PNG.
     fn stream_provider(release: std::path::PathBuf) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -452,6 +477,11 @@ mod tests {
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).unwrap();
                     let body: Value = serde_json::from_slice(&body).unwrap();
+                    if String::from_utf8_lossy(&request).contains("/images/generations") {
+                        let reply = json!({"data": [{"b64_json": PIXEL}]}).to_string();
+                        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+                        return;
+                    }
                     let title = body["instructions"]
                         .as_str()
                         .unwrap_or("")
@@ -490,6 +520,20 @@ mod tests {
                         .open(release.with_file_name("requests.log"))
                         .unwrap();
                     writeln!(log, "{}", body["input"]).unwrap();
+                    let input = body["input"].to_string();
+                    if input.contains("function_call_output") {
+                        send(done("Here is your boat.", false));
+                        return;
+                    }
+                    if input.contains("draw") {
+                        let offered = body["tools"].to_string().contains("generate_image");
+                        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"generate_image","arguments":"{\"prompt\":\"a red boat\"}","status":"completed"});
+                        let output = if offered { json!([call]) } else { json!([]) };
+                        send(
+                            json!({"type":"response.completed","response":{"id":"fixture","status":"completed","model":"gpt-6.1-sol","output":output,"usage":{"input_tokens":5,"output_tokens":2}}}),
+                        );
+                        return;
+                    }
                     if !body["tools"]
                         .as_array()
                         .is_some_and(|tools| tools.contains(&json!({"type":"web_search"})))
@@ -854,6 +898,7 @@ mod tests {
                 reason: None,
                 created_at_ms: 1,
                 sources: vec![],
+                images: vec![],
             };
             store.insert_message(&message).unwrap();
         }
@@ -1204,5 +1249,97 @@ mod tests {
         assert!(last.contains("and typed") && !last.contains(note), "{last}");
         let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
         assert_eq!(body["messages"][0]["text"], "what rises");
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_picture_makes_an_image_that_the_reply_shows_and_the_server_serves() {
+        let release = tempfile::tempdir().unwrap();
+        let release_file = release.path().join("release");
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release_file.clone()),
+            ),
+        ];
+        if !isolated(
+            "http::tests::a_request_for_a_picture_makes_an_image_that_the_reply_shows_and_the_server_serves",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("images");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(
+            folder.join("image-0000.png"),
+            b"not recorded by any message",
+        )
+        .unwrap();
+        let launch = Launch {
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some("low".into()),
+            images: Some(folder.clone()),
+            ..Launch::default()
+        };
+        let chats = Chats::new(
+            Store::open(&dir.path().join("covalent.db")).unwrap(),
+            launch,
+        );
+        let app = router(chats.clone(), None, &dir.path().join("web"));
+        let mut events = chats.subscribe();
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        let send = json!({"request_id": "r1", "text": "draw me a boat"});
+        call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
+        let body = settled(&app, &id).await;
+
+        let reply = &body["messages"][1];
+        assert_eq!(reply["status"], "complete", "{reply}");
+        assert_eq!(reply["text"], "Here is your boat.");
+        let images = reply["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1, "{reply}");
+        assert_eq!(
+            (&images[0]["width"], &images[0]["height"]),
+            (&json!(1), &json!(1))
+        );
+        let name = images[0]["name"].as_str().unwrap();
+        assert!(folder.join(name).exists());
+
+        let mut generating = false;
+        while let Ok(event) = events.try_recv() {
+            let event = serde_json::to_value(event).unwrap();
+            generating |= event["type"] == "preview" && event["generating"] == true;
+        }
+        assert!(generating, "no preview said an image was being made");
+
+        let fetch = |name: String| {
+            let app = app.clone();
+            async move {
+                let request = Request::get(format!("/api/images/{name}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                let kind = response.headers().get(header::CONTENT_TYPE).cloned();
+                let bytes = response
+                    .status()
+                    .is_success()
+                    .then_some(response.into_body().collect().await.unwrap().to_bytes());
+                (kind, bytes)
+            }
+        };
+        let (kind, bytes) = fetch(name.to_owned()).await;
+        assert_eq!(kind.unwrap(), "image/png");
+        assert_eq!(
+            bytes.unwrap()[..],
+            std::fs::read(folder.join(name)).unwrap()[..]
+        );
+        // A file in the folder that no message records, and a name that is not an image's.
+        for name in ["image-0000.png", "image-zz.png", "..%2Fcovalent.db"] {
+            assert!(
+                fetch(name.to_owned()).await.1.is_none(),
+                "{name} was served"
+            );
+        }
     }
 }

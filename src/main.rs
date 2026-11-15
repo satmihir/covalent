@@ -30,7 +30,12 @@ async fn serve() -> Result<(), String> {
         title_model: env("COVALENT_TITLE_MODEL"),
         title_effort: env("COVALENT_TITLE_EFFORT"),
         scripted: None,
+        // Images are made with the OpenAI key, as voice is; without it chats make none.
+        images: env("OPENAI_API_KEY").map(|_| data.join("images")),
     };
+    if let Some(folder) = &launch.images {
+        std::fs::create_dir_all(folder).map_err(|e| format!("create {}: {e}", folder.display()))?;
+    }
     let web = env("COVALENT_WEB_DIR").map_or_else(|| PathBuf::from("web/dist"), PathBuf::from);
     let port = env("COVALENT_PORT").unwrap_or_else(|| "7420".into());
     // Loopback only: re:agent's Session API is trusted-local, with no authorization of its own.

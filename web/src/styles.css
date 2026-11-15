@@ -513,6 +513,89 @@ button {
   font-weight: 600;
 }
 
+.images {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.image {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+.image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.image-download {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(24, 24, 27, 0.6);
+  color: #ffffff;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.image:hover .image-download,
+.image-download:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .image-download {
+    opacity: 1;
+  }
+}
+
+.image-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 480px;
+  aspect-ratio: 3 / 2;
+  margin-bottom: 12px;
+  border-radius: 14px;
+  background: linear-gradient(100deg, var(--code-bg) 30%, var(--hover) 50%, var(--code-bg) 70%);
+  background-size: 300% 100%;
+  color: var(--muted);
+  font-size: 14px;
+  animation: shimmer 2.2s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-tile {
+    animation: none;
+  }
+}
+
 .reply-actions {
   display: flex;
   gap: 2px;
