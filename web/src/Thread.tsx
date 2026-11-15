@@ -2,7 +2,7 @@ import { memo, useLayoutEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, Preview, Source } from "./api";
-import { GlobeIcon } from "./icons";
+import { GlobeIcon, SpeakerIcon, StopIcon } from "./icons";
 
 type Props = {
   chatId: string | null;
@@ -10,6 +10,10 @@ type Props = {
   previews: Record<string, Preview>;
   /** onRetry is absent when the chat cannot take messages, as when it is archived. */
   onRetry?: (message: Message) => void;
+  /** onSpeak reads a finished reply aloud, or stops it; it is absent without voice. */
+  onSpeak?: (message: Message) => void;
+  /** speaking is the ID of the reply being read aloud. */
+  speaking: string | null;
 };
 
 const Reply = memo(function Reply({ text }: { text: string }) {
@@ -88,7 +92,18 @@ function Status({ message, onRetry }: { message: Message; onRetry?: (m: Message)
   }
 }
 
-export function Thread({ chatId, messages, previews, onRetry }: Props) {
+function ReadAloud({ active, onClick }: { active: boolean; onClick: () => void }) {
+  const label = active ? "Stop reading" : "Read aloud";
+  return (
+    <div className="reply-actions">
+      <button className={`action-button ${active ? "active" : ""}`} onClick={onClick} aria-label={label} title={label}>
+        {active ? <StopIcon /> : <SpeakerIcon />}
+      </button>
+    </div>
+  );
+}
+
+export function Thread({ chatId, messages, previews, onRetry, onSpeak, speaking }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
 
@@ -128,6 +143,9 @@ export function Thread({ chatId, messages, previews, onRetry }: Props) {
                 <>
                   {m.text && <Reply text={m.text} />}
                   {m.status === "complete" && m.sources.length > 0 && <Sources sources={m.sources} />}
+                  {onSpeak && m.status === "complete" && m.text && (
+                    <ReadAloud active={speaking === m.id} onClick={() => onSpeak(m)} />
+                  )}
                   <Status message={m} onRetry={onRetry} />
                 </>
               )}

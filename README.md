@@ -49,6 +49,26 @@ New chats can search the web through the provider's hosted search (re:agent's
 a finished reply lists the pages it cites under the text. Title requests never
 search. Chats created before search was added keep their saved setting.
 
+## Voice
+
+With `OPENAI_API_KEY` set where Covalent starts, the composer gets a microphone
+button and every finished reply a speaker button. The microphone records one
+turn and puts its words in the composer to edit and send (OpenAI
+`gpt-transcribe`). The speaker reads the reply aloud as plain sentences: no
+Markdown, no URLs, and code blocks and tables replaced by a short spoken note
+(OpenAI `gpt-realtime-2.1-mini`, voice `marin`). Without the key the buttons do
+not appear.
+
+Voice sends recordings, and the text of each reply read aloud, to OpenAI, also
+in chats whose model is Claude. It is billed to the API key, apart from any
+ChatGPT plan: roughly half a cent per minute dictated and three cents per minute
+read aloud. Covalent stores no audio.
+
+The key is also one re:agent can use for chat. While your ChatGPT login is
+valid, chats still use the plan, but if the login lapses re:agent falls back to
+the key without saying so. To make that an error instead, start Covalent with
+`REAGENT_OPENAI_AUTH=chatgpt`.
+
 ## Models and archiving
 
 The model picker offers the catalog models whose provider has credentials

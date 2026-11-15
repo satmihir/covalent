@@ -1,5 +1,7 @@
 mod chats;
 mod http;
+mod speakable;
+mod speech;
 mod store;
 mod title;
 
@@ -37,7 +39,11 @@ async fn serve() -> Result<(), String> {
         .await
         .map_err(|e| format!("listen on {address}: {e}"))?;
     println!("covalent: serving http://{address}");
-    let app = http::router(chats::Chats::new(store, launch), &web);
+    let voice = speech::Voice::from_env();
+    if voice.is_none() {
+        println!("covalent: voice is off; set OPENAI_API_KEY to turn it on");
+    }
+    let app = http::router(chats::Chats::new(store, launch), voice, &web);
     // No graceful shutdown: open event streams never finish, and re:agent has already saved
     // every accepted step, so Ctrl-C ending the process loses nothing a restart cannot report.
     axum::serve(listener, app)

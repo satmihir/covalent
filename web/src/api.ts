@@ -84,6 +84,21 @@ export const api = {
       text,
     }).then((d) => d.messages),
   cancel: (id: string) => request<object>("POST", `/api/chats/${id}/cancel`),
+  /** voice reports whether the server has what dictation and reading aloud need. */
+  voice: () => request<{ available: boolean }>("GET", "/api/voice").then((d) => d.available),
+  transcribe: async (recording: Blob) => {
+    const response = await fetch("/api/transcribe", {
+      method: "POST",
+      headers: { "content-type": recording.type },
+      body: recording,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new ApiError(data.error ?? "http", data.message ?? `Transcription failed (${response.status})`);
+    }
+    return data.text as string;
+  },
+  speechUrl: (chatId: string, messageId: string) => `/api/chats/${chatId}/messages/${messageId}/speech`,
 };
 
 /** Describe turns any thrown value into a sentence for a notice. */

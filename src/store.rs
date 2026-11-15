@@ -151,6 +151,13 @@ impl Store {
         rows.collect()
     }
 
+    /// Message returns one message by ID.
+    pub fn message(&self, id: &str) -> rusqlite::Result<Option<Message>> {
+        self.conn
+            .query_row("SELECT * FROM messages WHERE id = ?1", [id], message)
+            .optional()
+    }
+
     /// Has_message reports whether a message ID is already used, which makes sends retryable.
     pub fn has_message(&self, id: &str) -> rusqlite::Result<bool> {
         self.conn

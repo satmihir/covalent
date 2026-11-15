@@ -1,6 +1,8 @@
-use crate::chats::{Chats, Failure};
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use crate::chats::{Chats, Failure, Reply};
+use crate::speech::{self, Voice};
+use axum::body::{Body, Bytes};
+use axum::extract::{DefaultBodyLimit, FromRef, Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -9,14 +11,36 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::{Stream, StreamExt};
 use tower_http::services::{ServeDir, ServeFile};
 
+/// RECORDING caps one dictated turn, several minutes of compressed speech.
+const RECORDING: usize = 10 * 1024 * 1024;
+
+/// App is what handlers share: the chats, and voice when an OpenAI key is configured.
+#[derive(Clone)]
+struct App {
+    chats: Arc<Chats>,
+    voice: Option<Voice>,
+}
+
+impl FromRef<App> for Arc<Chats> {
+    fn from_ref(app: &App) -> Self {
+        app.chats.clone()
+    }
+}
+
 /// Router serves the JSON API under `/api` and the built frontend from `web` for every other path.
-pub fn router(chats: Arc<Chats>, web: &std::path::Path) -> Router {
+pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) -> Router {
     let frontend = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     Router::new()
+        .route("/api/voice", get(voice_available))
+        .route(
+            "/api/transcribe",
+            post(transcribe).layer(DefaultBodyLimit::max(RECORDING)),
+        )
+        .route("/api/chats/{id}/messages/{message}/speech", get(speak))
         .route("/api/models", get(models))
         .route("/api/chats", get(list).post(create))
         .route("/api/chats/{id}", get(chat))
@@ -26,7 +50,7 @@ pub fn router(chats: Arc<Chats>, web: &std::path::Path) -> Router {
         .route("/api/chats/{id}/archive", post(archive))
         .route("/api/events", get(events))
         .fallback_service(frontend)
-        .with_state(chats)
+        .with_state(App { chats, voice })
 }
 
 #[derive(Deserialize)]
@@ -130,6 +154,71 @@ async fn cancel(State(chats): State<Arc<Chats>>, Path(id): Path<String>) -> impl
     .await
 }
 
+async fn voice_available(State(app): State<App>) -> Json<Value> {
+    Json(json!({"available": app.voice.is_some()}))
+}
+
+fn voice(app: &App) -> Result<Voice, Failure> {
+    app.voice.clone().ok_or_else(|| {
+        Failure::new(
+            503,
+            "voice_unavailable",
+            "Voice needs OPENAI_API_KEY where Covalent starts.",
+        )
+    })
+}
+
+/// Transcribe takes one recording as the body, typed by its Content-Type, and returns its words.
+async fn transcribe(
+    State(app): State<App>,
+    headers: HeaderMap,
+    audio: Bytes,
+) -> Result<Json<Value>, Failure> {
+    let voice = voice(&app)?;
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let text = voice.transcribe(audio.to_vec(), media_type).await?;
+    Ok(Json(json!({ "text": text })))
+}
+
+/// Speak streams a reply read aloud as raw PCM; closing the request stops the reading.
+async fn speak(
+    State(app): State<App>,
+    Path((id, message)): Path<(String, String)>,
+) -> Result<Response, Failure> {
+    let voice = voice(&app)?;
+    let (chats, chat, reply) = (app.chats.clone(), id.clone(), message.clone());
+    let found = tokio::task::spawn_blocking(move || chats.reply(&chat, &reply))
+        .await
+        .map_err(|e| Failure::new(500, "internal", format!("request worker failed: {e}")))??;
+    if found == Reply::Ended {
+        return Err(Failure::new(
+            409,
+            "not_speakable",
+            "This reply did not finish, so there is nothing to read.",
+        ));
+    }
+    let reader = voice.open().await?;
+    let (out, audio) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(speech::read_aloud(
+        app.chats.clone(),
+        reader,
+        id,
+        message,
+        out,
+    ));
+    let headers = [
+        (
+            header::CONTENT_TYPE,
+            format!("audio/pcm;rate={}", speech::RATE),
+        ),
+        (header::CACHE_CONTROL, "no-store".to_owned()),
+    ];
+    Ok((headers, Body::from_stream(ReceiverStream::new(audio))).into_response())
+}
+
 /// Events streams every chat's changes; a client that falls behind reloads what it shows.
 async fn events(
     State(chats): State<Arc<Chats>>,
@@ -152,6 +241,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use tower::ServiceExt;
 
@@ -193,7 +283,7 @@ mod tests {
             ..Launch::default()
         };
         let chats = Chats::new(Store::open(&dir.join("covalent.db")).unwrap(), launch);
-        (router(chats.clone(), &dir.join("web")), chats)
+        (router(chats.clone(), None, &dir.join("web")), chats)
     }
 
     async fn call(app: &Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -330,7 +420,8 @@ mod tests {
     }
 
     /// Stream_provider answers Responses requests on a loopback port: title requests at once,
-    /// and the chat reply as "Sourdough", then " rises." once the release file exists.
+    /// and the chat reply as a web search that ends once the `searched` file next to the release
+    /// file exists, then "Sourdough", then " rises." once the release file exists.
     fn stream_provider(release: std::path::PathBuf) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -399,6 +490,12 @@ mod tests {
                     send(
                         json!({"type":"response.web_search_call.searching","item_id":"ws","output_index":0}),
                     );
+                    while !release.with_file_name("searched").exists() {
+                        if !send(json!({"type":"keepalive"})) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     send(
                         json!({"type":"response.web_search_call.completed","item_id":"ws","output_index":0}),
                     );
@@ -445,7 +542,7 @@ mod tests {
             Store::open(&dir.path().join("covalent.db")).unwrap(),
             launch,
         );
-        let app = router(chats.clone(), &dir.path().join("web"));
+        let app = router(chats.clone(), None, &dir.path().join("web"));
         let mut events = chats.subscribe();
         let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
@@ -457,21 +554,28 @@ mod tests {
         )
         .await;
         let reply = sent["messages"][1]["id"].as_str().unwrap().to_owned();
+        let release = PathBuf::from(std::env::var("COVALENT_TEST_RELEASE").unwrap());
 
-        let end = Instant::now() + Duration::from_secs(10);
-        loop {
-            let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
-            if body["previews"][&reply]["text"] == "Sourdough" {
-                assert_eq!(body["messages"][1]["status"], "pending");
-                // Search start and end were previews 1 and 2.
-                assert_eq!(body["previews"][&reply]["seq"], 3);
-                assert_eq!(body["previews"][&reply]["searching"], false);
-                break;
+        let preview = |done: fn(&Value) -> bool| {
+            let (app, id, reply) = (app.clone(), id.clone(), reply.clone());
+            async move {
+                let end = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let (_, body) =
+                        call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+                    if done(&body["previews"][&reply]) {
+                        assert_eq!(body["messages"][1]["status"], "pending");
+                        return;
+                    }
+                    assert!(Instant::now() < end, "no such preview: {body}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
             }
-            assert!(Instant::now() < end, "no preview: {body}");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        std::fs::write(std::env::var("COVALENT_TEST_RELEASE").unwrap(), b"").unwrap();
+        };
+        preview(|p| p["searching"] == true).await;
+        std::fs::write(release.with_file_name("searched"), b"").unwrap();
+        preview(|p| p["text"] == "Sourdough" && p["searching"] == false).await;
+        std::fs::write(&release, b"").unwrap();
         let body = settled(&app, &id).await;
         assert_eq!(body["messages"][1]["text"], "Sourdough rises.");
         assert_eq!(
@@ -560,7 +664,7 @@ mod tests {
             Store::open(&dir.path().join("covalent.db")).unwrap(),
             Launch::default(),
         );
-        let app = router(chats, &dir.path().join("web"));
+        let app = router(chats, None, &dir.path().join("web"));
         let (_, models) = call(&app, "GET", "/api/models", Value::Null).await;
         let ids: Vec<_> = models["models"]
             .as_array()
@@ -597,5 +701,425 @@ mod tests {
         assert_eq!(switched["chat"]["model"], "gpt-6.1-sol");
         let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
         assert_eq!(body["chat"]["model"], "gpt-6.1-sol");
+    }
+
+    /// Openai_fake serves the two OpenAI routes voice uses, on a loopback port. Its "audio" is
+    /// the text it was asked to read followed by "|", so a test can hear what was said. A text
+    /// containing SLOW streams until the connection closes. With `reject`, both routes refuse
+    /// the key, and transcription repeats it the way OpenAI repeats part of a wrong key.
+    async fn openai_fake(reject: bool) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let fake = Router::new()
+            .route("/v1/audio/transcriptions", post(fake_transcription))
+            .route("/v1/realtime", get(fake_realtime))
+            .with_state((seen.clone(), reject));
+        tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+        (base, seen)
+    }
+
+    type Fake = State<(Arc<std::sync::Mutex<Vec<Value>>>, bool)>;
+
+    fn authorization(headers: &HeaderMap) -> String {
+        headers
+            .get(header::AUTHORIZATION)
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default()
+    }
+
+    async fn fake_transcription(
+        State((seen, reject)): Fake,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        let form = String::from_utf8_lossy(&body).into_owned();
+        let after = |marker: &str, end: &str| {
+            let start = form.find(marker).map(|i| i + marker.len())?;
+            Some(form[start..].split(end).next()?.to_owned())
+        };
+        let bearer = authorization(&headers);
+        seen.lock().unwrap().push(json!({
+            "route": "transcription",
+            "authorization": bearer,
+            "model": after("name=\"model\"\r\n\r\n", "\r\n"),
+            "filename": after("filename=\"", "\""),
+            "audio": form.contains("FAKE-AUDIO"),
+        }));
+        if reject {
+            let message = format!(
+                "Incorrect API key provided: {}",
+                bearer.trim_start_matches("Bearer ")
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": message}})),
+            )
+                .into_response();
+        }
+        Json(json!({"text": "  Hello there.  ", "languages": [{"code": "en"}]})).into_response()
+    }
+
+    async fn fake_realtime(
+        State((seen, reject)): Fake,
+        headers: HeaderMap,
+        axum::extract::RawQuery(query): axum::extract::RawQuery,
+        upgrade: axum::extract::ws::WebSocketUpgrade,
+    ) -> Response {
+        seen.lock().unwrap().push(json!({
+            "route": "realtime",
+            "authorization": authorization(&headers),
+            "query": query,
+        }));
+        if reject {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        upgrade.on_upgrade(move |socket| fake_session(socket, seen))
+    }
+
+    async fn fake_session(
+        mut socket: axum::extract::ws::WebSocket,
+        seen: Arc<std::sync::Mutex<Vec<Value>>>,
+    ) {
+        use axum::extract::ws::Message as Ws;
+        use base64::Engine;
+        let say = |event: Value| Ws::Text(event.to_string().into());
+        let delta = |audio: &[u8]| {
+            let audio = base64::engine::general_purpose::STANDARD.encode(audio);
+            say(json!({"type": "response.output_audio.delta", "delta": audio}))
+        };
+        let _ = socket.send(say(json!({"type": "session.created"}))).await;
+        while let Some(Ok(Ws::Text(frame))) = socket.recv().await {
+            let event: Value = serde_json::from_str(&frame).unwrap();
+            seen.lock()
+                .unwrap()
+                .push(json!({"route": "event", "event": event}));
+            match event["type"].as_str().unwrap() {
+                "session.update" => {
+                    let _ = socket.send(say(json!({"type": "session.updated"}))).await;
+                }
+                "response.create" => {
+                    let text = event["response"]["input"][0]["content"][0]["text"]
+                        .as_str()
+                        .unwrap();
+                    if text.contains("SLOW") {
+                        loop {
+                            tokio::select! {
+                                frame = socket.recv() => if !matches!(frame, Some(Ok(Ws::Text(_)))) { break },
+                                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                                    if socket.send(delta(b"..")).await.is_err() { break }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    let (first, second) = text.as_bytes().split_at(text.len() / 2);
+                    let _ = socket.send(delta(first)).await;
+                    let _ = socket.send(delta(&[second, b"|"].concat())).await;
+                    let done =
+                        json!({"type": "response.done", "response": {"status": "completed"}});
+                    let _ = socket.send(say(done)).await;
+                }
+                _ => {}
+            }
+        }
+        seen.lock().unwrap().push(json!({"route": "closed"}));
+    }
+
+    /// Stored serves one chat whose second message is a reply with the given text and status.
+    fn stored(dir: &std::path::Path, text: &str, status: &str, voice: Option<Voice>) -> Router {
+        use crate::store::Message;
+        let store = Store::open(&dir.join("covalent.db")).unwrap();
+        store.create_chat("chat1", "gpt-6.1-sol", 1).unwrap();
+        for (id, role, text, status) in [
+            ("ask", "user", "Tell me.", "complete"),
+            ("reply", "assistant", text, status),
+        ] {
+            let message = Message {
+                id: id.into(),
+                chat_id: "chat1".into(),
+                role: role.into(),
+                text: text.into(),
+                status: status.into(),
+                reason: None,
+                created_at_ms: 1,
+                sources: vec![],
+            };
+            store.insert_message(&message).unwrap();
+        }
+        router(
+            Chats::new(store, Launch::default()),
+            voice,
+            &dir.join("web"),
+        )
+    }
+
+    async fn upload(app: &Router, media_type: &str, audio: &[u8]) -> (StatusCode, String) {
+        let request = Request::post("/api/transcribe")
+            .header("content-type", media_type)
+            .body(Body::from(audio.to_vec()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn listen(app: &Router, uri: &str) -> (StatusCode, String) {
+        let response = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn spoken(seen: &std::sync::Mutex<Vec<Value>>) -> Vec<Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["event"]["type"] == "response.create")
+            .map(|r| r["event"]["response"].clone())
+            .collect()
+    }
+
+    /// Closed waits for the fake to see its Realtime session end.
+    async fn closed(seen: &std::sync::Mutex<Vec<Value>>) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !seen.lock().unwrap().iter().any(|r| r["route"] == "closed") {
+            assert!(Instant::now() < end, "the OpenAI session stayed open");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    const SPEECH: &str = "/api/chats/chat1/messages/reply/speech";
+
+    #[tokio::test]
+    async fn without_a_key_voice_is_off_and_its_routes_say_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = stored(dir.path(), "Hello.", "complete", None);
+        let (_, body) = call(&app, "GET", "/api/voice", Value::Null).await;
+        assert_eq!(body, json!({"available": false}));
+        let (status, body) = upload(&app, "audio/webm", b"FAKE-AUDIO").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body.contains("voice_unavailable") && body.contains("OPENAI_API_KEY"),
+            "{body}"
+        );
+        let (status, _) = listen(&app, SPEECH).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn a_recording_reaches_the_transcription_model_and_returns_its_words() {
+        let (base, seen) = openai_fake(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = stored(
+            dir.path(),
+            "Hello.",
+            "complete",
+            Some(Voice::new("voice-test-key".into(), base)),
+        );
+        let (_, body) = call(&app, "GET", "/api/voice", Value::Null).await;
+        assert_eq!(body, json!({"available": true}));
+
+        let (status, body) = upload(&app, "audio/webm;codecs=opus", b"FAKE-AUDIO").await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::OK, r#"{"text":"Hello there."}"#)
+        );
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            json!({"route": "transcription", "authorization": "Bearer voice-test-key",
+                   "model": "gpt-transcribe", "filename": "audio.webm", "audio": true})
+        );
+        let (status, body) = upload(&app, "text/plain", b"FAKE-AUDIO").await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{body}");
+        let (status, body) = upload(&app, "audio/mp4", b"").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, _) = upload(&app, "audio/wav", &vec![0; 11 * 1024 * 1024]).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "only the good recording reached OpenAI"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_reply_is_read_aloud_as_plain_sentences() {
+        let (base, seen) = openai_fake(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let text = "## Rising\nSourdough needs **time**. Keep it warm ([bread.example](https://bread.example/x?utm_source=openai)).\n```\nmix()\n```\nBake at noon?";
+        let app = stored(
+            dir.path(),
+            text,
+            "complete",
+            Some(Voice::new("voice-test-key".into(), base)),
+        );
+        let (status, audio) = listen(&app, SPEECH).await;
+        assert_eq!(status, StatusCode::OK, "{audio}");
+        let fake = seen;
+        assert_eq!(audio, "Rising. Sourdough needs time. Keep it warm. The code is shown on screen. Bake at noon?|");
+
+        let seen = fake.lock().unwrap().clone();
+        assert_eq!(seen[0]["authorization"], "Bearer voice-test-key");
+        assert_eq!(seen[0]["query"], "model=gpt-realtime-2.1-mini");
+        let session = &seen[1]["event"]["session"];
+        assert_eq!(
+            session["audio"]["output"],
+            json!({"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin"})
+        );
+        assert!(session["audio"]["input"]["turn_detection"].is_null());
+        let response = &seen[2]["event"]["response"];
+        assert_eq!(response["conversation"], "none");
+        assert!(response["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("exactly as written"));
+        drop(seen);
+        closed(&fake).await;
+    }
+
+    #[tokio::test]
+    async fn only_finished_replies_of_the_chat_can_be_read() {
+        let (base, seen) = openai_fake(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = stored(
+            dir.path(),
+            "Half a rep",
+            "cancelled",
+            Some(Voice::new("k".into(), base)),
+        );
+        let (status, body) = listen(&app, SPEECH).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        for uri in [
+            "/api/chats/chat1/messages/ask/speech",
+            "/api/chats/other/messages/reply/speech",
+            "/api/chats/chat1/messages/none/speech",
+        ] {
+            let (status, _) = listen(&app, uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "nothing reached OpenAI");
+    }
+
+    #[tokio::test]
+    async fn closing_a_speech_request_closes_the_openai_session() {
+        let (base, seen) = openai_fake(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = stored(
+            dir.path(),
+            "A SLOW reply.",
+            "complete",
+            Some(Voice::new("k".into(), base)),
+        );
+        let response = app
+            .clone()
+            .oneshot(Request::get(SPEECH).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(&first[..], b"..");
+        drop(body);
+        closed(&seen).await;
+    }
+
+    #[tokio::test]
+    async fn a_rejected_key_is_reported_without_repeating_it() {
+        let (base, _) = openai_fake(true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let key = "sk-test-SECRET-0123456789";
+        let app = stored(
+            dir.path(),
+            "Hello.",
+            "complete",
+            Some(Voice::new(key.into(), base)),
+        );
+        let (status, body) = upload(&app, "audio/webm", b"FAKE-AUDIO").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            body.contains("OpenAI rejected OPENAI_API_KEY") && !body.contains("SECRET"),
+            "{body}"
+        );
+        let (status, body) = listen(&app, SPEECH).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            body.contains("OpenAI rejected OPENAI_API_KEY") && !body.contains("SECRET"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_reply_is_read_aloud_as_it_is_written() {
+        let release = tempfile::tempdir().unwrap();
+        let release_file = release.path().join("release");
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release_file.clone()),
+            ),
+            ("COVALENT_TEST_RELEASE", release_file.display().to_string()),
+        ];
+        if !isolated(
+            "http::tests::a_pending_reply_is_read_aloud_as_it_is_written",
+            &env,
+        ) {
+            return;
+        }
+        let release = PathBuf::from(std::env::var("COVALENT_TEST_RELEASE").unwrap());
+        std::fs::write(release.with_file_name("searched"), b"").unwrap();
+        let (base, seen) = openai_fake(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let launch = Launch {
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some("low".into()),
+            ..Launch::default()
+        };
+        let chats = Chats::new(
+            Store::open(&dir.path().join("covalent.db")).unwrap(),
+            launch,
+        );
+        let app = router(
+            chats,
+            Some(Voice::new("k".into(), base)),
+            &dir.path().join("web"),
+        );
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        let send = json!({"request_id": "r1", "text": "Tell me about bread."});
+        let (_, sent) = call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
+        let reply = sent["messages"][1]["id"].as_str().unwrap().to_owned();
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+            if body["previews"][&reply]["text"] == "Sourdough" {
+                break;
+            }
+            assert!(Instant::now() < end, "no preview: {body}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let uri = format!("/api/chats/{id}/messages/{reply}/speech");
+        let response = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let audio =
+            tokio::spawn(async move { response.into_body().collect().await.unwrap().to_bytes() });
+        std::fs::write(&release, b"").unwrap();
+        let audio = tokio::time::timeout(Duration::from_secs(10), audio)
+            .await
+            .unwrap()
+            .unwrap();
+        // The unfinished sentence waited for the rest of the reply and was read once, whole.
+        assert_eq!(&audio[..], b"Sourdough rises.|");
+        assert_eq!(spoken(&seen).len(), 1);
     }
 }

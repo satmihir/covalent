@@ -91,6 +91,17 @@ pub struct Preview {
     pub searching: bool,
 }
 
+/// Reply is an assistant message's text as speech follows it.
+#[derive(Debug, PartialEq)]
+pub enum Reply {
+    /// Pending carries the text written so far, which a newer attempt may replace.
+    Pending(String),
+    /// Complete carries the final text.
+    Complete(String),
+    /// Ended means the reply failed or was stopped, so nothing more should be said.
+    Ended,
+}
+
 /// Failure is a request error with the HTTP status it should produce.
 #[derive(Debug)]
 pub struct Failure {
@@ -100,7 +111,8 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn new(status: u16, code: &str, message: impl Into<String>) -> Self {
+    /// New builds a Failure from its HTTP status, error code and sentence.
+    pub fn new(status: u16, code: &str, message: impl Into<String>) -> Self {
         Self {
             status,
             code: code.into(),
@@ -179,6 +191,30 @@ impl Chats {
             .filter(|(_, (chat, _))| chat == chat_id)
             .map(|(id, (_, preview))| (id.clone(), preview.clone()))
             .collect()
+    }
+
+    /// Reply returns one of a chat's replies for reading aloud.
+    pub fn reply(&self, chat_id: &str, message_id: &str) -> Result<Reply, Failure> {
+        // The store lock comes first, as in await_reply, which removes a preview and records
+        // the final text under it: a read sees one or the other.
+        let store = self.store.lock().unwrap();
+        let message = store
+            .message(message_id)?
+            .filter(|m| m.chat_id == chat_id && m.role == "assistant")
+            .ok_or_else(|| Failure::new(404, "not_found", "no such reply"))?;
+        Ok(match message.status.as_str() {
+            "pending" => {
+                let previews = self.previews.lock().unwrap();
+                Reply::Pending(
+                    previews
+                        .get(message_id)
+                        .map(|(_, p)| p.text.clone())
+                        .unwrap_or_default(),
+                )
+            }
+            "complete" => Reply::Complete(message.text),
+            _ => Reply::Ended,
+        })
     }
 
     /// Models lists the catalog models whose provider has credentials here, and the default.

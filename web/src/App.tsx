@@ -9,6 +9,7 @@ import {
   type PreviewEvent,
   type ServerEvent,
 } from "./api";
+import { play, type Playback } from "./audio";
 import { Composer } from "./Composer";
 import { MenuIcon, NewChatIcon } from "./icons";
 import { ModelPicker } from "./ModelPicker";
@@ -82,6 +83,15 @@ export function App() {
   const [previews, setPreviews] = useState<Record<string, Preview>>({});
   const queued = useRef<PreviewEvent[]>([]);
   const frame = useRef(0);
+  const [voice, setVoice] = useState(false);
+  const [speaking, setSpeaking] = useState<string | null>(null);
+  const playback = useRef<Playback | null>(null);
+
+  const stopSpeaking = useCallback(() => {
+    playback.current?.stop();
+    playback.current = null;
+    setSpeaking(null);
+  }, []);
 
   const showPreviews = useCallback((next: Record<string, Preview>) => {
     previewRef.current = next;
@@ -97,8 +107,9 @@ export function App() {
       showPreviews({});
       setNotice(null);
       setSidebarOpen(false);
+      stopSpeaking();
     },
-    [showPreviews],
+    [showPreviews, stopSpeaking],
   );
 
   const load = useCallback(
@@ -162,6 +173,7 @@ export function App() {
       // A remembered model this server no longer offers falls back to the default.
       setNewModel((chosen) => (chosen && models.some((m) => m.id === chosen) ? chosen : null));
     }, () => {});
+    api.voice().then(setVoice, () => {});
     open(idFromPath(), false);
     const onPop = () => open(idFromPath(), false);
     addEventListener("popstate", onPop);
@@ -276,6 +288,22 @@ export function App() {
     if (prompt) void send(prompt.text);
   };
 
+  const speak = (reply: Message) => {
+    const again = playback.current !== null && speaking === reply.id;
+    stopSpeaking();
+    if (again || !chatId) return;
+    const current = play(api.speechUrl(chatId, reply.id));
+    playback.current = current;
+    setSpeaking(reply.id);
+    current.done
+      .catch((error) => setNotice({ text: describe(error), tone: "error" }))
+      .finally(() => {
+        if (playback.current !== current) return;
+        playback.current = null;
+        setSpeaking(null);
+      });
+  };
+
   const stop = () => {
     if (chatId) api.cancel(chatId).catch((error) => setNotice({ text: describe(error), tone: "error" }));
   };
@@ -319,7 +347,14 @@ export function App() {
             <h1>What can I help with?</h1>
           </div>
         ) : (
-          <Thread chatId={chatId} messages={messages} previews={previews} onRetry={archived ? undefined : retry} />
+          <Thread
+            chatId={chatId}
+            messages={messages}
+            previews={previews}
+            onRetry={archived ? undefined : retry}
+            onSpeak={voice ? speak : undefined}
+            speaking={speaking}
+          />
         )}
         <div className="composer-dock">
           {notice && (
@@ -342,6 +377,8 @@ export function App() {
               onChange={setDraft}
               onSend={send}
               onStop={stop}
+              voice={voice}
+              onError={(text) => setNotice({ text, tone: "error" })}
             />
           )}
           <p className="footnote">Covalent runs on re:agent. Replies can be wrong, so check what matters.</p>

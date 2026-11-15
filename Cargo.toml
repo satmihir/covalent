@@ -6,17 +6,22 @@ edition = "2021"
 [dependencies]
 reagent = { git = "https://github.com/satmihir/re-agent", rev = "2c41dab33f62e604f9a8cf7c07603a7142792813" }
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+axum = { version = "0.8", features = ["ws"] }
 
 [profile.release]
 panic = "abort"
