@@ -80,6 +80,26 @@ valid, chats still use the plan, but if the login lapses re:agent falls back to
 the key without saying so. To make that an error instead, start Covalent with
 `REAGENT_OPENAI_AUTH=chatgpt`.
 
+## Files
+
+Each new chat has a folder of its own, `workspaces/<name>/` in Covalent's data
+folder, and its model can list, read, search, create, edit and delete files
+there with re:agent's file tools. Ask for a file ("write a packing list as
+Markdown", "add sunscreen to it") and the reply lists what the model did, each
+call as one row while it works, folded to one line afterwards. A row for a
+file the model wrote links to it: pictures open in the page, anything else
+downloads, so a file the model wrote can never run as part of Covalent.
+
+A chat cannot run programs or commands, and its file tools stay inside its own
+folder. One reply can make at most 40 tool calls in 30 model requests. Web
+search stays on, so a chat that has read a file could put its text into a
+search query. Folders are never deleted, including when a chat is archived.
+Chats created before folders existed keep working as they did, without files.
+
+Covalent answers only requests addressed to this machine (`127.0.0.1`,
+`localhost` or `[::1]`) and refuses a request a browser sends from another
+site.
+
 ## Images
 
 With `OPENAI_API_KEY` set where Covalent starts, new chats can make images. Ask
@@ -89,11 +109,10 @@ image then sits above a short reply. Click it to open it at full size, or use
 the download button. It works in OpenAI and Claude chats alike; an OpenAI model
 also sees a small copy of what it made, a Claude model is only told it was made.
 
-Images are saved in `images/` in Covalent's data folder and are never deleted.
-Each one costs about four cents on the API key, apart from any ChatGPT plan,
-and a reply can make at most four. The image prompt goes to OpenAI, also in
-chats whose model is Claude. Chats created before this keep their saved
-setting and make none.
+Images are saved as PNG files in the chat's folder and are never deleted. Each
+one costs about four cents on the API key, apart from any ChatGPT plan. The
+image prompt goes to OpenAI, also in chats whose model is Claude. Pictures made
+before chats had folders stay in `images/` in the data folder.
 
 ## Models and archiving
 

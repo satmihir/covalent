@@ -15,7 +15,7 @@ pub fn generate(launch: &Launch, message: &str) -> String {
 }
 
 fn ask(launch: &Launch, message: &str) -> Result<String, String> {
-    let api = open_session(launch.options(true, None)).map_err(|e| e.message)?;
+    let api = open_session(launch.title_options()).map_err(|e| e.message)?;
     let result = request(&api, message);
     let _ = api.close();
     result

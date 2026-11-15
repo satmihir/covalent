@@ -1,8 +1,9 @@
 use crate::chats::{Chats, Failure, Reply};
 use crate::speech::{self, Voice};
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, FromRef, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRef, Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -42,6 +43,7 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
         )
         .route("/api/chats/{id}/messages/{message}/speech", get(speak))
         .route("/api/images/{name}", get(image))
+        .route("/api/chats/{id}/files/{*path}", get(file))
         .route("/api/models", get(models))
         .route("/api/chats", get(list).post(create))
         .route("/api/chats/{id}", get(chat))
@@ -51,7 +53,41 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
         .route("/api/chats/{id}/archive", post(archive))
         .route("/api/events", get(events))
         .fallback_service(frontend)
+        .layer(middleware::from_fn(local))
         .with_state(App { chats, voice })
+}
+
+/// Local refuses a request a browser addressed to, or sent from, any site but this machine,
+/// so a web page can neither point its own name at Covalent nor post to it from elsewhere.
+/// Browsers always send Host, and Origin on a cross-site post; a request without them did
+/// not come from a page.
+async fn local(request: Request, next: Next) -> Response {
+    if addressed_here(request.headers()) {
+        return next.run(request).await;
+    }
+    let body = json!({"error": "forbidden", "message": "Covalent answers only this machine."});
+    (StatusCode::FORBIDDEN, Json(body)).into_response()
+}
+
+fn addressed_here(headers: &HeaderMap) -> bool {
+    let header = |name| headers.get(name).map(|v| v.to_str().unwrap_or(""));
+    let origin = header(header::ORIGIN).map(|origin| {
+        let origin = origin.split_once("://").map_or("", |(_, rest)| rest);
+        origin.split('/').next().unwrap_or("")
+    });
+    [header(header::HOST), origin]
+        .into_iter()
+        .flatten()
+        .all(loopback)
+}
+
+/// Loopback accepts this machine's own names, with or without a port.
+fn loopback(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    matches!(name, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 #[derive(Deserialize)]
@@ -242,6 +278,56 @@ async fn image(
 }
 
 /// Events streams every chat's changes; a client that falls behind reloads what it shows.
+/// File serves one file from a chat's folder. The model wrote these files, so only pictures
+/// are shown in the page; anything else is a download that cannot run as part of Covalent.
+async fn file(
+    State(chats): State<Arc<Chats>>,
+    Path((id, path)): Path<(String, String)>,
+) -> Result<Response, Failure> {
+    let name = path.rsplit('/').next().unwrap_or("").to_owned();
+    let bytes = tokio::task::spawn_blocking(move || chats.file(&id, &path))
+        .await
+        .map_err(|e| Failure::new(500, "internal", format!("request worker failed: {e}")))??;
+    let extension = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    let picture = match extension.as_deref() {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        _ => None,
+    };
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    if let Some(kind) = picture {
+        headers.insert(header::CONTENT_TYPE, kind.parse().unwrap());
+        return Ok(response);
+    }
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    let disposition = format!("attachment; filename*=UTF-8''{}", percent(&name));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        disposition
+            .parse()
+            .map_err(|_| Failure::new(500, "internal", "unusable file name"))?,
+    );
+    Ok(response)
+}
+
+/// Percent encodes a file name for a Content-Disposition header.
+fn percent(name: &str) -> String {
+    name.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 async fn events(
     State(chats): State<Arc<Chats>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -293,6 +379,19 @@ mod tests {
         false
     }
 
+    /// Launch is a chat launch that keeps its folders in `dir` and makes no images.
+    fn launch(dir: &std::path::Path) -> Launch {
+        Launch {
+            model: None,
+            effort: None,
+            title_model: None,
+            title_effort: None,
+            scripted: None,
+            data: dir.into(),
+            images: false,
+        }
+    }
+
     fn app(dir: &std::path::Path, replies: &[&str]) -> (Router, Arc<Chats>) {
         let script = dir.join("script.json");
         let responses: Vec<Value> = replies
@@ -302,7 +401,7 @@ mod tests {
         std::fs::write(&script, serde_json::to_vec(&responses).unwrap()).unwrap();
         let launch = Launch {
             scripted: Some(script),
-            ..Launch::default()
+            ..launch(dir)
         };
         let chats = Chats::new(Store::open(&dir.join("covalent.db")).unwrap(), launch);
         (router(chats.clone(), None, &dir.join("web")), chats)
@@ -522,12 +621,24 @@ mod tests {
                     writeln!(log, "{}", body["input"]).unwrap();
                     let input = body["input"].to_string();
                     if input.contains("function_call_output") {
-                        send(done("Here is your boat.", false));
+                        let text = if input.contains("write_file") {
+                            "Saved your list."
+                        } else {
+                            "Here is your boat."
+                        };
+                        send(done(text, false));
+                        return;
+                    }
+                    if input.contains("packing list") {
+                        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"write_file","arguments":"{\"path\":\"list.md\",\"content\":\"- socks\\n\"}","status":"completed"});
+                        send(
+                            json!({"type":"response.completed","response":{"id":"fixture","status":"completed","model":"gpt-6.1-sol","output":[call],"usage":{"input_tokens":5,"output_tokens":2}}}),
+                        );
                         return;
                     }
                     if input.contains("draw") {
                         let offered = body["tools"].to_string().contains("generate_image");
-                        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"generate_image","arguments":"{\"prompt\":\"a red boat\"}","status":"completed"});
+                        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"generate_image","arguments":"{\"prompt\":\"a red boat\",\"output_path\":\"boat.png\"}","status":"completed"});
                         let output = if offered { json!([call]) } else { json!([]) };
                         send(
                             json!({"type":"response.completed","response":{"id":"fixture","status":"completed","model":"gpt-6.1-sol","output":output,"usage":{"input_tokens":5,"output_tokens":2}}}),
@@ -590,7 +701,7 @@ mod tests {
         let launch = Launch {
             model: Some("gpt-6.1-sol".into()),
             effort: Some("low".into()),
-            ..Launch::default()
+            ..launch(dir.path())
         };
         let chats = Chats::new(
             Store::open(&dir.path().join("covalent.db")).unwrap(),
@@ -716,7 +827,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chats = Chats::new(
             Store::open(&dir.path().join("covalent.db")).unwrap(),
-            Launch::default(),
+            launch(dir.path()),
         );
         let app = router(chats, None, &dir.path().join("web"));
         let (_, models) = call(&app, "GET", "/api/models", Value::Null).await;
@@ -884,7 +995,7 @@ mod tests {
     fn stored(dir: &std::path::Path, text: &str, status: &str, voice: Option<Voice>) -> Router {
         use crate::store::Message;
         let store = Store::open(&dir.join("covalent.db")).unwrap();
-        store.create_chat("chat1", "gpt-6.1-sol", 1).unwrap();
+        store.create_chat("chat1", "gpt-6.1-sol", None, 1).unwrap();
         for (id, role, text, status) in [
             ("ask", "user", "Tell me.", "complete"),
             ("reply", "assistant", text, status),
@@ -899,14 +1010,11 @@ mod tests {
                 created_at_ms: 1,
                 sources: vec![],
                 images: vec![],
+                activity: vec![],
             };
             store.insert_message(&message).unwrap();
         }
-        router(
-            Chats::new(store, Launch::default()),
-            voice,
-            &dir.join("web"),
-        )
+        router(Chats::new(store, launch(dir)), voice, &dir.join("web"))
     }
 
     async fn upload(app: &Router, media_type: &str, audio: &[u8]) -> (StatusCode, String) {
@@ -1133,7 +1241,7 @@ mod tests {
         let launch = Launch {
             model: Some("gpt-6.1-sol".into()),
             effort: Some("low".into()),
-            ..Launch::default()
+            ..launch(dir.path())
         };
         let chats = Chats::new(
             Store::open(&dir.path().join("covalent.db")).unwrap(),
@@ -1202,7 +1310,7 @@ mod tests {
         let launch = Launch {
             model: Some("gpt-6.1-sol".into()),
             effort: Some("low".into()),
-            ..Launch::default()
+            ..launch(dir.path())
         };
         let chats = Chats::new(
             Store::open(&dir.path().join("covalent.db")).unwrap(),
@@ -1251,15 +1359,122 @@ mod tests {
         assert_eq!(body["messages"][0]["text"], "what rises");
     }
 
+    /// Fetch gets a path from the app with the given headers, returning the response's
+    /// status, headers and body.
+    async fn fetch(
+        app: &Router,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Bytes) {
+        let mut request = Request::get(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        (
+            parts.status,
+            parts.headers,
+            body.collect().await.unwrap().to_bytes(),
+        )
+    }
+
+    /// Fake_chat opens a chat whose Session talks to the streaming fake provider, with images
+    /// on, and returns the app, the chats, their data folder and the new chat's ID.
+    async fn fake_chat(dir: &std::path::Path) -> (Router, Arc<Chats>, String) {
+        let launch = Launch {
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some("low".into()),
+            images: true,
+            ..launch(dir)
+        };
+        let chats = Chats::new(Store::open(&dir.join("covalent.db")).unwrap(), launch);
+        let app = router(chats.clone(), None, &dir.join("web"));
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        (app, chats, id)
+    }
+
     #[tokio::test]
-    async fn a_request_for_a_picture_makes_an_image_that_the_reply_shows_and_the_server_serves() {
+    async fn a_request_for_a_file_writes_it_in_the_chats_folder_and_lists_the_work() {
         let release = tempfile::tempdir().unwrap();
-        let release_file = release.path().join("release");
         let env = [
             ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
             (
                 "REAGENT_OPENAI_BASE_URL",
-                stream_provider(release_file.clone()),
+                stream_provider(release.path().join("release")),
+            ),
+        ];
+        if !isolated(
+            "http::tests::a_request_for_a_file_writes_it_in_the_chats_folder_and_lists_the_work",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, chats, id) = fake_chat(dir.path()).await;
+        let mut events = chats.subscribe();
+        let send = json!({"request_id": "r1", "text": "make me a packing list"});
+        call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
+        let body = settled(&app, &id).await;
+
+        let reply = &body["messages"][1];
+        assert_eq!(reply["text"], "Saved your list.", "{reply}");
+        let row = json!({"call_id":"call_1","tool":"write_file","target":"list.md",
+                         "state":"done","operation":"create","error":null});
+        assert_eq!(reply["activity"], json!([row]));
+        let mut announced = false;
+        while let Ok(event) = events.try_recv() {
+            let event = serde_json::to_value(event).unwrap();
+            announced |= event["type"] == "activity" && event["activity"][0]["target"] == "list.md";
+        }
+        assert!(
+            announced,
+            "no event reported the call while the reply was pending"
+        );
+
+        let folder = dir
+            .path()
+            .join("workspaces")
+            .join(body["chat"]["workspace"].as_str().unwrap());
+        assert_eq!(std::fs::read(folder.join("list.md")).unwrap(), b"- socks\n");
+        let (status, headers, bytes) =
+            fetch(&app, &format!("/api/chats/{id}/files/list.md"), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&bytes[..], b"- socks\n");
+        // A file the model wrote is never shown as a page of Covalent's own.
+        assert_eq!(headers[header::CONTENT_TYPE], "application/octet-stream");
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert!(headers[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment"));
+
+        // Nothing outside the chat's folder is served, by a path or through a link.
+        std::os::unix::fs::symlink(dir.path().join("covalent.db"), folder.join("link")).unwrap();
+        for path in [
+            "..%2F..%2Fcovalent.db",
+            "link",
+            "missing.md",
+            "%2Fetc%2Fhosts",
+        ] {
+            let (status, _, _) = fetch(&app, &format!("/api/chats/{id}/files/{path}"), &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_picture_makes_an_image_that_the_reply_shows_and_the_server_serves() {
+        let release = tempfile::tempdir().unwrap();
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release.path().join("release")),
             ),
         ];
         if !isolated(
@@ -1269,27 +1484,8 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let folder = dir.path().join("images");
-        std::fs::create_dir(&folder).unwrap();
-        std::fs::write(
-            folder.join("image-0000.png"),
-            b"not recorded by any message",
-        )
-        .unwrap();
-        let launch = Launch {
-            model: Some("gpt-6.1-sol".into()),
-            effort: Some("low".into()),
-            images: Some(folder.clone()),
-            ..Launch::default()
-        };
-        let chats = Chats::new(
-            Store::open(&dir.path().join("covalent.db")).unwrap(),
-            launch,
-        );
-        let app = router(chats.clone(), None, &dir.path().join("web"));
+        let (app, chats, id) = fake_chat(dir.path()).await;
         let mut events = chats.subscribe();
-        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
-        let id = created["chat"]["id"].as_str().unwrap().to_owned();
         let send = json!({"request_id": "r1", "text": "draw me a boat"});
         call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
         let body = settled(&app, &id).await;
@@ -1297,15 +1493,11 @@ mod tests {
         let reply = &body["messages"][1];
         assert_eq!(reply["status"], "complete", "{reply}");
         assert_eq!(reply["text"], "Here is your boat.");
-        let images = reply["images"].as_array().unwrap();
-        assert_eq!(images.len(), 1, "{reply}");
         assert_eq!(
-            (&images[0]["width"], &images[0]["height"]),
-            (&json!(1), &json!(1))
+            reply["images"],
+            json!([{"name": "boat.png", "width": 1, "height": 1}])
         );
-        let name = images[0]["name"].as_str().unwrap();
-        assert!(folder.join(name).exists());
-
+        assert_eq!(reply["activity"][0]["tool"], "generate_image");
         let mut generating = false;
         while let Ok(event) = events.try_recv() {
             let event = serde_json::to_value(event).unwrap();
@@ -1313,33 +1505,97 @@ mod tests {
         }
         assert!(generating, "no preview said an image was being made");
 
-        let fetch = |name: String| {
-            let app = app.clone();
-            async move {
-                let request = Request::get(format!("/api/images/{name}"))
-                    .body(Body::empty())
-                    .unwrap();
-                let response = app.oneshot(request).await.unwrap();
-                let kind = response.headers().get(header::CONTENT_TYPE).cloned();
-                let bytes = response
-                    .status()
-                    .is_success()
-                    .then_some(response.into_body().collect().await.unwrap().to_bytes());
-                (kind, bytes)
-            }
-        };
-        let (kind, bytes) = fetch(name.to_owned()).await;
-        assert_eq!(kind.unwrap(), "image/png");
+        let folder = dir
+            .path()
+            .join("workspaces")
+            .join(body["chat"]["workspace"].as_str().unwrap());
+        let (status, headers, bytes) =
+            fetch(&app, &format!("/api/chats/{id}/files/boat.png"), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
         assert_eq!(
-            bytes.unwrap()[..],
-            std::fs::read(folder.join(name)).unwrap()[..]
+            bytes[..],
+            std::fs::read(folder.join("boat.png")).unwrap()[..]
         );
+    }
+
+    #[tokio::test]
+    async fn a_picture_made_before_chats_had_folders_is_served_only_when_recorded() {
+        use crate::store::{Image, Message};
+        let dir = tempfile::tempdir().unwrap();
+        let images = dir.path().join("images");
+        std::fs::create_dir(&images).unwrap();
+        for name in ["image-ab12.png", "image-0000.png"] {
+            std::fs::write(images.join(name), name).unwrap();
+        }
+        let store = Store::open(&dir.path().join("covalent.db")).unwrap();
+        store.create_chat("old", "gpt-6.1-sol", None, 1).unwrap();
+        let mut reply = Message {
+            id: "reply".into(),
+            chat_id: "old".into(),
+            role: "assistant".into(),
+            text: String::new(),
+            status: "pending".into(),
+            reason: None,
+            created_at_ms: 1,
+            sources: vec![],
+            images: vec![],
+            activity: vec![],
+        };
+        store.insert_message(&reply).unwrap();
+        reply.status = "complete".into();
+        reply.images = vec![Image {
+            name: "image-ab12.png".into(),
+            width: 1,
+            height: 1,
+        }];
+        store.finish_message(&reply).unwrap();
+        let app = router(
+            Chats::new(store, launch(dir.path())),
+            None,
+            &dir.path().join("web"),
+        );
+        let (status, headers, bytes) = fetch(&app, "/api/images/image-ab12.png", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        assert_eq!(&bytes[..], b"image-ab12.png");
         // A file in the folder that no message records, and a name that is not an image's.
         for name in ["image-0000.png", "image-zz.png", "..%2Fcovalent.db"] {
-            assert!(
-                fetch(name.to_owned()).await.1.is_none(),
-                "{name} was served"
-            );
+            let (status, _, _) = fetch(&app, &format!("/api/images/{name}"), &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{name}");
+        }
+        // An older chat has no folder to serve files from.
+        let (status, _, _) = fetch(&app, "/api/chats/old/files/image-ab12.png", &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn requests_addressed_to_or_sent_from_another_site_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app(dir.path(), &[]);
+        for headers in [
+            &[("host", "127.0.0.1:7420")][..],
+            &[
+                ("host", "localhost:5173"),
+                ("origin", "http://localhost:5173"),
+            ],
+            &[("host", "[::1]:7420")],
+            &[],
+        ] {
+            let (status, _, _) = fetch(&app, "/api/chats", headers).await;
+            assert_eq!(status, StatusCode::OK, "{headers:?}");
+        }
+        for headers in [
+            &[("host", "covalent.example:7420")][..],
+            &[
+                ("host", "127.0.0.1:7420"),
+                ("origin", "https://elsewhere.example"),
+            ],
+            &[("host", "127.0.0.1:7420"), ("origin", "null")],
+            &[("host", "localhost.example")],
+        ] {
+            let (status, _, _) = fetch(&app, "/api/chats", headers).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
         }
     }
 }

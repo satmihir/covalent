@@ -1,11 +1,13 @@
+use crate::activity::Action;
 use crate::store::{Chat, Image, Message, Store};
 use reagent::session_api::{
-    self, ApiError, CommandState, HistoryMode, PlanMode, PreviewCursor, PreviewPage, RunKind,
-    RunRef, SessionApi, SessionChange, SessionOptions,
+    self, ApiError, CommandState, EntryCursor, EventCursor, EventKind, HistoryMode, PlanMode,
+    PreviewCursor, PreviewPage, RunKind, RunRef, RunState, SessionApi, SessionChange,
+    SessionOptions, SessionSnapshot,
 };
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -19,12 +21,13 @@ const TITLE_PROMPT: &str = "You write titles for chats. Given the first message 
 /// IMAGES is added to a chat's instructions when it can make images.
 const IMAGES: &str = "\n\nYou can create images with the generate_image tool. Use it only when \
     the user asks for a picture, drawing or illustration, and write the tool's prompt as a full \
-    description of the image. The image is shown to the user right above your reply, so answer \
-    with one short sentence: do not describe the image at length, link to it, name a file, or \
-    repeat the prompt.";
+    description of the image. Save each image as a new .png file with a short descriptive name. \
+    The image is shown to the user right above your reply, so answer with one short sentence: \
+    do not describe the image at length, link to it, or repeat the prompt.";
 
-/// MAX_IMAGE_CALLS bounds what one reply can cost in image generations.
-const MAX_IMAGE_CALLS: u64 = 4;
+/// MAX_TOOL_CALLS and MAX_STEPS bound one reply's work, and so what a runaway reply can cost.
+const MAX_TOOL_CALLS: u64 = 40;
+const MAX_STEPS: u64 = 30;
 
 /// SPOKEN is the note a dictated turn carries, so the reply suits being heard.
 const SPOKEN: &str = "The user said this message aloud in voice mode, so it may contain \
@@ -33,7 +36,7 @@ const SPOKEN: &str = "The user said this message aloud in voice mode, so it may 
     and keep it brief unless they ask for detail.";
 
 /// Launch holds the settings every chat Session opens with.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Launch {
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -41,43 +44,61 @@ pub struct Launch {
     pub title_effort: Option<String>,
     /// scripted replaces inference with a re:agent response script, for offline tests.
     pub scripted: Option<PathBuf>,
-    /// images is the folder new chats save generated images in; without it they make none.
-    pub images: Option<PathBuf>,
+    /// data is Covalent's data folder: each chat's folder is in `workspaces/`, and the
+    /// pictures chats made before they had folders are in `images/`.
+    pub data: PathBuf,
+    /// images lets new chats create pictures, which needs the OpenAI key.
+    pub images: bool,
 }
 
 impl Launch {
-    /// Options returns the Session settings for a chat, or for a title request.
-    /// A model chosen in the picker runs at its own default effort.
-    pub fn options(&self, title: bool, chosen: Option<&str>) -> SessionOptions {
-        let (model, effort) = match (title, chosen) {
-            (true, _) => (self.title_model.clone(), self.title_effort.clone()),
-            (false, Some(model)) => (Some(model.to_owned()), None),
-            (false, None) => (self.model.clone(), self.effort.clone()),
+    /// Title_options returns the settings of a throwaway Session that writes a chat's title.
+    pub fn title_options(&self) -> SessionOptions {
+        SessionOptions {
+            model: self.title_model.clone(),
+            reasoning_effort: self.title_effort.clone(),
+            scripted: self.scripted.clone(),
+            tool_free: true,
+            instructions: Some(TITLE_PROMPT.into()),
+            agents: false,
+            checkpoint: false,
+            origin: Some("covalent".into()),
+            ..SessionOptions::default()
+        }
+    }
+
+    /// Chat_options returns the settings of a chat's Session, which works with files in
+    /// `workspace` and runs no commands. A model chosen in the picker runs at its own default effort.
+    pub fn chat_options(&self, chosen: Option<&str>, workspace: PathBuf) -> SessionOptions {
+        let (model, effort) = match chosen {
+            Some(model) => (Some(model.to_owned()), None),
+            None => (self.model.clone(), self.effort.clone()),
         };
-        let images = self.images.as_ref().filter(|_| !title);
-        let instructions = match (title, images) {
-            (true, _) => TITLE_PROMPT.to_owned(),
-            (false, Some(_)) => format!("{}{IMAGES}", PROMPT.trim_end()),
-            (false, None) => PROMPT.to_owned(),
+        let instructions = if self.images {
+            format!("{}{IMAGES}", PROMPT.trim_end())
+        } else {
+            PROMPT.to_owned()
         };
-        let mut options = SessionOptions {
+        SessionOptions {
+            workspace,
             model,
             reasoning_effort: effort,
             scripted: self.scripted.clone(),
-            tool_free: true,
             instructions: Some(instructions),
             agents: false,
-            checkpoint: !title,
-            web_search: !title,
+            exec: false,
+            web_search: true,
+            image_generation: self.images,
+            max_steps: MAX_STEPS,
+            max_tool_calls: MAX_TOOL_CALLS,
             origin: Some("covalent".into()),
             ..SessionOptions::default()
-        };
-        if let Some(folder) = images {
-            options.image_generation = true;
-            options.workspace = folder.clone();
-            options.max_tool_calls = MAX_IMAGE_CALLS;
         }
-        options
+    }
+
+    /// Workspace is the path of a chat's folder, from the name the store records.
+    fn workspace(&self, chat: &Chat) -> Option<PathBuf> {
+        Some(self.data.join("workspaces").join(chat.workspace.as_ref()?))
     }
 }
 
@@ -105,6 +126,12 @@ pub enum Event {
         /// generating is true from when this reply starts making an image until it finishes.
         generating: bool,
     },
+    /// Activity carries all of a pending reply's tool calls so far, each time one changes.
+    Activity {
+        chat_id: String,
+        message_id: String,
+        activity: Vec<Action>,
+    },
 }
 
 /// Model is one catalog model the picker offers.
@@ -122,6 +149,7 @@ pub struct Preview {
     pub text: String,
     pub searching: bool,
     pub generating: bool,
+    pub activity: Vec<Action>,
 }
 
 /// Reply is an assistant message's text as speech follows it.
@@ -278,14 +306,28 @@ impl Chats {
         if let Some(model) = model {
             known(model)?;
         }
-        let api = session_api::open_session(self.launch.options(false, model))?;
+        // The folder is named before the Session, whose ID names the chat, can exist.
+        let folder = reagent::types::new_id();
+        let workspace = self.launch.data.join("workspaces").join(&folder);
+        std::fs::create_dir_all(&workspace).map_err(|e| {
+            Failure::new(500, "workspace", format!("create the chat's folder: {e}"))
+        })?;
+        let api =
+            match session_api::open_session(self.launch.chat_options(model, workspace.clone())) {
+                Ok(api) => api,
+                Err(error) => {
+                    let _ = std::fs::remove_dir(&workspace);
+                    return Err(error.into());
+                }
+            };
         let snapshot = api.get_snapshot()?;
         let id = snapshot.session.session_id;
-        let chat = self
-            .store
-            .lock()
-            .unwrap()
-            .create_chat(&id, &snapshot.model, now_ms())?;
+        let chat = self.store.lock().unwrap().create_chat(
+            &id,
+            &snapshot.model,
+            Some(&folder),
+            now_ms(),
+        )?;
         self.live.lock().unwrap().insert(id, api);
         Ok(chat)
     }
@@ -340,8 +382,7 @@ impl Chats {
     }
 
     /// Send admits a user message and returns the chat's messages, ending with the pending reply.
-    /// A spoken message carries a note asking for a reply suited to being heard, in chats
-    /// that can take one: those opened before tool-free chats existed cannot.
+    /// A spoken message carries a note asking for a reply suited to being heard.
     pub fn send(
         self: &Arc<Self>,
         chat_id: &str,
@@ -362,7 +403,8 @@ impl Chats {
         }
         let first = messages.is_empty();
         let api = self.session(chat_id)?;
-        let note = (spoken && api.get_snapshot()?.tool_free).then_some(SPOKEN);
+        let note = spoken.then_some(SPOKEN);
+        let start = start(&api.get_snapshot()?);
         let submit = |api: &SessionApi| match note {
             Some(note) => {
                 api.send_message_with_note(request_id, text.as_bytes(), note, PlanMode::Keep)
@@ -391,6 +433,7 @@ impl Chats {
             created_at_ms: now,
             sources: vec![],
             images: vec![],
+            activity: vec![],
         };
         let reply = Message {
             id: run.run_id.clone(),
@@ -404,10 +447,15 @@ impl Chats {
             store.insert_message(&user)?;
             store.insert_message(&reply)?;
         }
+        // The reply's preview exists until it finishes, so nothing can announce it afterwards.
+        self.previews
+            .lock()
+            .unwrap()
+            .insert(run.run_id.clone(), (chat_id.into(), Preview::default()));
         let chats = self.clone();
         let api = self.session(chat_id)?;
         let reply_chat = chat_id.to_owned();
-        std::thread::spawn(move || chats.await_reply(&reply_chat, &api, &run));
+        std::thread::spawn(move || chats.await_reply(&reply_chat, &api, &run, start));
         if first {
             let chats = self.clone();
             let (chat_id, text) = (chat_id.to_owned(), text.to_owned());
@@ -439,7 +487,18 @@ impl Chats {
         Ok(api)
     }
 
-    fn await_reply(&self, chat_id: &str, api: &SessionApi, run: &RunRef) {
+    fn await_reply(
+        self: &Arc<Self>,
+        chat_id: &str,
+        api: &SessionApi,
+        run: &RunRef,
+        (entries, events): (EntryCursor, EventCursor),
+    ) {
+        let follower = {
+            let (chats, chat_id, api, run) =
+                (self.clone(), chat_id.to_owned(), api.clone(), run.clone());
+            std::thread::spawn(move || chats.follow(&chat_id, &api, &run, Some(entries), events))
+        };
         let mut cursor = None;
         // Any read error leaves the reply to arrive whole from wait_run.
         while let Ok(page) = api.read_preview(run, cursor, 30_000, None) {
@@ -466,7 +525,7 @@ impl Chats {
                     .effects
                     .iter()
                     .filter(|e| e.tool == "generate_image" && e.operation == "create")
-                    .filter_map(|e| self.saved_image(std::str::from_utf8(&e.path).ok()?))
+                    .filter_map(|e| self.saved_image(chat_id, std::str::from_utf8(&e.path).ok()?))
                     .collect();
                 match result.status.as_str() {
                     "completed" | "refused" => (text, "complete", None),
@@ -488,17 +547,26 @@ impl Chats {
             ),
             Err(error) => (String::new(), "failed", Some(error.message)),
         };
+        // The follower stops once the Run is over, having read all of its Entries.
+        let mut activity = follower.join().unwrap_or_default();
+        crate::activity::stop(&mut activity);
         let store = self.store.lock().unwrap();
         // The final reply replaces the preview; a stopped reply shows none of its partial text.
         self.previews.lock().unwrap().remove(&run.run_id);
-        match store.finish_message(
-            &run.run_id,
-            &text,
-            status,
-            reason.as_deref(),
-            &sources,
-            &images,
-        ) {
+        let Some(Ok(mut reply)) = store.message(&run.run_id).transpose() else {
+            eprintln!(
+                "covalent: record reply {}: the message is missing",
+                run.run_id
+            );
+            return;
+        };
+        reply.text = text;
+        reply.status = status.into();
+        reply.reason = reason;
+        reply.sources = sources;
+        reply.images = images;
+        reply.activity = activity;
+        match store.finish_message(&reply) {
             Ok(message) => {
                 let _ = self.events.send(Event::Message { message });
             }
@@ -510,9 +578,9 @@ impl Chats {
     /// so a reload sees either the text or the event that follows it.
     fn preview(&self, chat_id: &str, message_id: &str, page: &PreviewPage) {
         let mut previews = self.previews.lock().unwrap();
-        let (_, preview) = previews
-            .entry(message_id.to_owned())
-            .or_insert_with(|| (chat_id.to_owned(), Preview::default()));
+        let Some((_, preview)) = previews.get_mut(message_id) else {
+            return;
+        };
         preview.seq += 1;
         if page.restarted {
             preview.text.clear();
@@ -532,9 +600,55 @@ impl Chats {
         });
     }
 
+    /// Follow announces a reply's tool calls as they are made and finish, until its Run ends,
+    /// and returns them.
+    fn follow(
+        &self,
+        chat_id: &str,
+        api: &SessionApi,
+        run: &RunRef,
+        mut entries: Option<EntryCursor>,
+        mut events: EventCursor,
+    ) -> Vec<Action> {
+        let mut activity = Vec::new();
+        loop {
+            let Ok(page) = api.read_events(events.clone(), 100, 30_000, None) else {
+                // Events were missed or belong to an earlier opening; the Entries stay readable.
+                let _ = api.wait_run(run);
+                read_activity(api, run, &mut entries, &mut activity);
+                return activity;
+            };
+            events = page.next_cursor.clone();
+            let ended = page.end_of_opening || page.events.iter().any(|e| {
+                matches!(&e.change, EventKind::RunChanged { run: r, state: RunState::Terminal, .. }
+                        if r.run_id == run.run_id)
+            });
+            let added = page.events.iter().any(|e| e.entries_available.is_some());
+            if (added || ended) && read_activity(api, run, &mut entries, &mut activity) {
+                let mut previews = self.previews.lock().unwrap();
+                if let Some((_, preview)) = previews.get_mut(&run.run_id) {
+                    preview.activity = activity.clone();
+                    let _ = self.events.send(Event::Activity {
+                        chat_id: chat_id.into(),
+                        message_id: run.run_id.clone(),
+                        activity: activity.clone(),
+                    });
+                }
+            }
+            if ended {
+                return activity;
+            }
+        }
+    }
+
     /// Saved_image describes a generated file by the size in its PNG header.
-    fn saved_image(&self, name: &str) -> Option<Image> {
-        let bytes = std::fs::read(self.launch.images.as_ref()?.join(image_name(name)?)).ok()?;
+    fn saved_image(&self, chat_id: &str, name: &str) -> Option<Image> {
+        let chat = self.store.lock().unwrap().chat(chat_id).ok()??;
+        let path = match self.launch.workspace(&chat) {
+            Some(folder) => inside(&folder, name)?,
+            None => self.launch.data.join("images").join(image_name(name)?),
+        };
+        let bytes = std::fs::read(path).ok()?;
         let size = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
         let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.get(12..16) == Some(b"IHDR");
         Some(Image {
@@ -544,15 +658,29 @@ impl Chats {
         })
     }
 
-    /// Image returns a generated image's bytes, only for a name some message records.
+    /// Image returns the bytes of a picture made before chats had folders, only for a name
+    /// some message records.
     pub fn image(&self, name: &str) -> Result<Vec<u8>, Failure> {
         let missing = || Failure::new(404, "not_found", "no such image");
         let name = image_name(name).ok_or_else(missing)?;
         if !self.store.lock().unwrap().has_image(name)? {
             return Err(missing());
         }
-        let folder = self.launch.images.as_ref().ok_or_else(missing)?;
-        std::fs::read(folder.join(name)).map_err(|_| missing())
+        std::fs::read(self.launch.data.join("images").join(name)).map_err(|_| missing())
+    }
+
+    /// File returns one file from a chat's folder, refusing any path that leaves it.
+    pub fn file(&self, chat_id: &str, path: &str) -> Result<Vec<u8>, Failure> {
+        let missing = || Failure::new(404, "not_found", "no such file");
+        let chat = self
+            .store
+            .lock()
+            .unwrap()
+            .chat(chat_id)?
+            .ok_or_else(missing)?;
+        let folder = self.launch.workspace(&chat).ok_or_else(missing)?;
+        let path = inside(&folder, path).ok_or_else(missing)?;
+        std::fs::read(path).map_err(|_| missing())
     }
 
     fn write_title(&self, chat_id: &str, text: &str) {
@@ -566,6 +694,56 @@ impl Chats {
             title,
         });
     }
+}
+
+/// Start is where a reply's activity is read from: history and events as they stand before it.
+fn start(snapshot: &SessionSnapshot) -> (EntryCursor, EventCursor) {
+    let entries = EntryCursor {
+        session: snapshot.session.clone(),
+        generation: snapshot.context.history_generation,
+        position: snapshot.context.entry_count,
+    };
+    (entries, snapshot.event_cursor.clone())
+}
+
+/// Read_activity adds a Run's new tool calls and outcomes to `activity` and reports a change.
+/// Rewritten history, or a cursor from an earlier opening, restarts from the beginning.
+fn read_activity(
+    api: &SessionApi,
+    run: &RunRef,
+    entries: &mut Option<EntryCursor>,
+    activity: &mut Vec<Action>,
+) -> bool {
+    let mut changed = false;
+    loop {
+        let page = match api.read_entries(entries.clone(), 100) {
+            Ok(page) => page,
+            Err(error)
+                if entries.is_some() && matches!(error.code, "cursor_expired" | "conflict") =>
+            {
+                *entries = None;
+                continue;
+            }
+            Err(_) => return changed,
+        };
+        for entry in &page.entries {
+            if entry.run.as_ref().is_some_and(|r| r.run_id == run.run_id) {
+                changed |= crate::activity::record(activity, &entry.content);
+            }
+        }
+        *entries = Some(page.next_cursor);
+        if !page.has_more {
+            return changed;
+        }
+    }
+}
+
+/// Inside resolves a relative path within a folder, refusing one that leaves it, through `..`
+/// or a symbolic link, and anything that is not a file.
+fn inside(folder: &Path, relative: &str) -> Option<PathBuf> {
+    let folder = folder.canonicalize().ok()?;
+    let path = folder.join(relative).canonicalize().ok()?;
+    (path.starts_with(&folder) && path.is_file()).then_some(path)
 }
 
 /// Image_name accepts only the file names re:agent gives generated images.

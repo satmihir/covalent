@@ -446,6 +446,99 @@ button {
   }
 }
 
+.activity {
+  margin-bottom: 10px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.activity-toggle:hover {
+  color: var(--text);
+}
+
+.activity-toggle svg {
+  transition: transform 0.15s;
+}
+
+.activity-toggle.open svg {
+  transform: rotate(180deg);
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.action > span:last-child,
+.action > a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 3px;
+}
+
+.action a:hover {
+  color: var(--text);
+}
+
+.action.failed {
+  color: var(--danger);
+}
+
+.action-mark {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  justify-content: center;
+}
+
+.action-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+.action-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--faint);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.action.stopped .action-spinner {
+  animation: none;
+}
+
 .searching {
   display: inline-flex;
   align-items: center;
@@ -466,7 +559,8 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .searching svg {
+  .searching svg,
+  .action-spinner {
     animation: none;
   }
 }

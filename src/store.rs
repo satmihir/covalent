@@ -1,3 +1,4 @@
+use crate::activity::Action;
 use reagent::session_api::Source;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -14,9 +15,12 @@ pub struct Chat {
     pub model: Option<String>,
     /// archived_at_ms hides the chat from Covalent; its Session stays resumable from the CLI.
     pub archived_at_ms: Option<i64>,
+    /// workspace names the chat's folder under `workspaces/`; chats made before folders have none.
+    pub workspace: Option<String>,
 }
 
-/// Image is one picture a reply made, served by its file name.
+/// Image is one picture a reply made: a path in the chat's folder, or the file name of a
+/// picture made before chats had folders.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
     pub name: String,
@@ -40,6 +44,8 @@ pub struct Message {
     pub sources: Vec<Source>,
     /// images lists the pictures a reply made, in the order it made them.
     pub images: Vec<Image>,
+    /// activity lists the tool calls a reply made, in the order it made them.
+    pub activity: Vec<Action>,
 }
 
 /// Store keeps chats and their displayed messages in one SQLite file.
@@ -74,6 +80,8 @@ impl Store {
             ("chats", "archived_at_ms", "INTEGER"),
             ("messages", "sources", "TEXT"),
             ("messages", "images", "TEXT"),
+            ("chats", "workspace", "TEXT"),
+            ("messages", "activity", "TEXT"),
         ] {
             let columns: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
@@ -110,11 +118,18 @@ impl Store {
             .optional()
     }
 
-    /// Create_chat records a new untitled chat.
-    pub fn create_chat(&self, id: &str, model: &str, now_ms: i64) -> rusqlite::Result<Chat> {
+    /// Create_chat records a new untitled chat and the name of its folder.
+    pub fn create_chat(
+        &self,
+        id: &str,
+        model: &str,
+        workspace: Option<&str>,
+        now_ms: i64,
+    ) -> rusqlite::Result<Chat> {
         self.conn.execute(
-            "INSERT INTO chats (id, model, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?3)",
-            params![id, model, now_ms],
+            "INSERT INTO chats (id, model, workspace, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, model, workspace, now_ms],
         )?;
         Ok(Chat {
             id: id.into(),
@@ -123,6 +138,7 @@ impl Store {
             updated_at_ms: now_ms,
             model: Some(model.into()),
             archived_at_ms: None,
+            workspace: workspace.map(str::to_owned),
         })
     }
 
@@ -212,22 +228,26 @@ impl Store {
         Ok(())
     }
 
-    /// Finish_message records a reply's final text and status and returns the updated message.
-    pub fn finish_message(
-        &self,
-        id: &str,
-        text: &str,
-        status: &str,
-        reason: Option<&str>,
-        sources: &[Source],
-        images: &[Image],
-    ) -> rusqlite::Result<Message> {
-        let sources = (!sources.is_empty()).then(|| serde_json::to_string(sources).unwrap());
-        let images = (!images.is_empty()).then(|| serde_json::to_string(images).unwrap());
+    /// Finish_message records a finished reply, whose ID names the message to update, and
+    /// returns the updated message.
+    pub fn finish_message(&self, reply: &Message) -> rusqlite::Result<Message> {
+        fn list<T: Serialize>(items: &[T]) -> Option<String> {
+            (!items.is_empty()).then(|| serde_json::to_string(items).unwrap())
+        }
+        let id = &reply.id;
         self.conn.execute(
-            "UPDATE messages SET text = ?2, status = ?3, reason = ?4, sources = ?5, images = ?6
+            "UPDATE messages SET text = ?2, status = ?3, reason = ?4, sources = ?5, images = ?6,
+                activity = ?7
              WHERE id = ?1",
-            params![id, text, status, reason, sources, images],
+            params![
+                id,
+                reply.text,
+                reply.status,
+                reply.reason,
+                list(&reply.sources),
+                list(&reply.images),
+                list(&reply.activity)
+            ],
         )?;
         self.conn
             .query_row("SELECT * FROM messages WHERE id = ?1", [id], message)
@@ -242,6 +262,7 @@ fn chat(row: &Row) -> rusqlite::Result<Chat> {
         updated_at_ms: row.get("updated_at_ms")?,
         model: row.get("model")?,
         archived_at_ms: row.get("archived_at_ms")?,
+        workspace: row.get("workspace")?,
     })
 }
 
@@ -254,15 +275,18 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
         status: row.get("status")?,
         reason: row.get("reason")?,
         created_at_ms: row.get("created_at_ms")?,
-        sources: row
-            .get::<_, Option<String>>("sources")?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default(),
-        images: row
-            .get::<_, Option<String>>("images")?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default(),
+        sources: list(row, "sources")?,
+        images: list(row, "images")?,
+        activity: list(row, "activity")?,
     })
+}
+
+/// List reads a JSON list column, empty when unset or unreadable.
+fn list<T: serde::de::DeserializeOwned>(row: &Row, column: &str) -> rusqlite::Result<Vec<T>> {
+    Ok(row
+        .get::<_, Option<String>>(column)?
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -280,6 +304,7 @@ mod tests {
             created_at_ms: 1,
             sources: vec![],
             images: vec![],
+            activity: vec![],
         }
     }
 
@@ -289,7 +314,7 @@ mod tests {
         let path = dir.path().join("covalent.db");
         {
             let store = Store::open(&path).unwrap();
-            store.create_chat("c", "m", 1).unwrap();
+            store.create_chat("c", "m", None, 1).unwrap();
             store.insert_message(&reply("pending", "pending")).unwrap();
             store.insert_message(&reply("done", "complete")).unwrap();
         }
@@ -313,8 +338,8 @@ mod tests {
     fn chats_are_listed_by_latest_activity() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("covalent.db")).unwrap();
-        store.create_chat("older", "m", 1).unwrap();
-        store.create_chat("newer", "m", 2).unwrap();
+        store.create_chat("older", "m", None, 1).unwrap();
+        store.create_chat("newer", "m", None, 2).unwrap();
         let mut m = reply("m", "complete");
         m.chat_id = "older".into();
         m.created_at_ms = 3;

@@ -6,6 +6,8 @@ export type Chat = {
   /** model is null for chats created before Covalent recorded it. */
   model: string | null;
   archived_at_ms: number | null;
+  /** workspace names the chat's folder; chats made before folders have none. */
+  workspace: string | null;
 };
 
 export type Model = { id: string; provider: string; note: string };
@@ -14,8 +16,21 @@ export type MessageStatus = "pending" | "complete" | "failed" | "cancelled" | "i
 
 export type Source = { url: string; title: string };
 
-/** Image is a picture a reply made, served at `/api/images/{name}`. */
+/** Image is a picture a reply made: a path in the chat's folder, or for an older chat a name
+ *  served at `/api/images/{name}`. */
 export type Image = { name: string; width: number; height: number };
+
+/** Action is one tool call a reply made. */
+export type Action = {
+  call_id: string;
+  tool: string;
+  /** target is the path or search text the call names. */
+  target: string | null;
+  state: "working" | "done" | "failed" | "stopped";
+  /** operation is what a file tool reported doing, such as "create" or "update". */
+  operation: string | null;
+  error: string | null;
+};
 
 export type Message = {
   id: string;
@@ -29,10 +44,18 @@ export type Message = {
   sources: Source[];
   /** images lists the pictures a reply made. */
   images: Image[];
+  /** activity lists the tool calls a reply made. */
+  activity: Action[];
 };
 
 /** Preview is a pending reply's text so far, numbered by its latest preview event. */
-export type Preview = { seq: number; text: string; searching: boolean; generating: boolean };
+export type Preview = {
+  seq: number;
+  text: string;
+  searching: boolean;
+  generating: boolean;
+  activity: Action[];
+};
 
 export type PreviewEvent = {
   type: "preview";
@@ -49,6 +72,7 @@ export type ServerEvent =
   | { type: "message"; message: Message }
   | { type: "title"; chat_id: string; title: string }
   | PreviewEvent
+  | { type: "activity"; chat_id: string; message_id: string; activity: Action[] }
   | { type: "archived"; chat_id: string }
   | { type: "lagged" };
 
@@ -107,6 +131,8 @@ export const api = {
     return data.text as string;
   },
   imageUrl: (name: string) => `/api/images/${name}`,
+  fileUrl: (chatId: string, path: string) =>
+    `/api/chats/${chatId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
   speechUrl: (chatId: string, messageId: string) => `/api/chats/${chatId}/messages/${messageId}/speech`,
 };
 

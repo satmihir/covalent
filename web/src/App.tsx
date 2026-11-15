@@ -157,6 +157,7 @@ export function App() {
         text: event.restarted || !known ? event.text : known.text + event.text,
         searching: event.searching,
         generating: event.generating,
+        activity: known?.activity ?? [],
       };
     }
     showPreviews(next);
@@ -215,6 +216,13 @@ export function App() {
       } else if (event.type === "preview") {
         queued.current.push(event);
         if (!frame.current) frame.current = requestAnimationFrame(flushPreviews);
+      } else if (event.type === "activity") {
+        // Each event carries the whole list, so the latest one is all that matters.
+        if (event.chat_id === current.current) {
+          const known = previewRef.current[event.message_id];
+          const empty = { seq: 0, text: "", searching: false, generating: false };
+          showPreviews({ ...previewRef.current, [event.message_id]: { ...(known ?? empty), activity: event.activity } });
+        }
       } else if (event.type === "title") {
         setChats((list) => list.map((c) => (c.id === event.chat_id ? { ...c, title: event.title } : c)));
       } else if (event.type === "archived") {
@@ -236,8 +244,8 @@ export function App() {
     const requestId = crypto.randomUUID();
     const now = Date.now();
     const optimistic: Message[] = [
-      { id: requestId, chat_id: chatId ?? "", role: "user", text, status: "complete", reason: null, created_at_ms: now, sources: [], images: [] },
-      { id: `local:${requestId}`, chat_id: chatId ?? "", role: "assistant", text: "", status: "pending", reason: null, created_at_ms: now, sources: [], images: [] },
+      { id: requestId, chat_id: chatId ?? "", role: "user", text, status: "complete", reason: null, created_at_ms: now, sources: [], images: [], activity: [] },
+      { id: `local:${requestId}`, chat_id: chatId ?? "", role: "assistant", text: "", status: "pending", reason: null, created_at_ms: now, sources: [], images: [], activity: [] },
     ];
     const isOptimistic = (m: Message) => optimistic.some((o) => o.id === m.id);
     setNotice(null);
@@ -386,6 +394,7 @@ export function App() {
             chatId={chatId}
             messages={messages}
             previews={previews}
+            fileUrl={(path) => (openChat?.workspace && chatId ? api.fileUrl(chatId, path) : api.imageUrl(path))}
             onRetry={archived ? undefined : retry}
             onSpeak={voice && !voiceMode ? speak : undefined}
             speaking={speaking}
