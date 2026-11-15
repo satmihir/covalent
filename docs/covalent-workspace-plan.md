@@ -38,6 +38,26 @@ Checked live on port 7421:
 Not checked: stopping a reply mid-work, a blocked Session after uncertain
 effects, and the cost of the tool definitions per request.
 
+**Milestone 11, 2026-11-14:** built as planned, needing nothing more from
+re:agent.
+
+- `GET /api/chats/{id}/files` lists up to 500 files in path order, without
+  following symbolic links.
+- The panel opens from a folder button in the chat's header and sits beside the
+  thread. Below 768 pixels it covers the page, as the sidebar does.
+- A row in a reply's activity opens its file in the panel.
+- The file logic that is not layout (how a file is shown, decoding, sizes,
+  which files a reply touched) has Node tests.
+
+Checked in the browser on port 7421, in light and dark:
+
+- The list showed sizes and marked the file the latest reply changed.
+- A Markdown file showed as wrapped plain text, a PNG as a picture, a binary
+  file as "not text" with a download, and an HTML file as its source.
+- Asking the chat to edit the open file reloaded the view with the change.
+- Clicking an activity row reopened the panel on that file.
+- An older chat showed no folder button.
+
 Seen once: Claude Haiku made an unrequested `generate_image` call to
 `/dev/null.png` alongside a file request. re:agent refused the path before any
 image request, and the model said so in its reply.

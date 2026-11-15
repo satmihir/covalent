@@ -43,6 +43,7 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
         )
         .route("/api/chats/{id}/messages/{message}/speech", get(speak))
         .route("/api/images/{name}", get(image))
+        .route("/api/chats/{id}/files", get(files))
         .route("/api/chats/{id}/files/{*path}", get(file))
         .route("/api/models", get(models))
         .route("/api/chats", get(list).post(create))
@@ -278,6 +279,10 @@ async fn image(
 }
 
 /// Events streams every chat's changes; a client that falls behind reloads what it shows.
+async fn files(State(chats): State<Arc<Chats>>, Path(id): Path<String>) -> impl IntoResponse {
+    blocking(move || chats.files(&id)).await
+}
+
 /// File serves one file from a chat's folder. The model wrote these files, so only pictures
 /// are shown in the page; anything else is a download that cannot run as part of Covalent.
 async fn file(
@@ -1566,6 +1571,54 @@ mod tests {
         }
         // An older chat has no folder to serve files from.
         let (status, _, _) = fetch(&app, "/api/chats/old/files/image-ab12.png", &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_chats_files_are_listed_in_path_order_up_to_the_bound() {
+        if !isolated(
+            "http::tests::a_chats_files_are_listed_in_path_order_up_to_the_bound",
+            &[],
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app(dir.path(), &["unused"]);
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap();
+        let folder = dir
+            .path()
+            .join("workspaces")
+            .join(created["chat"]["workspace"].as_str().unwrap());
+        let (status, empty) =
+            call(&app, "GET", &format!("/api/chats/{id}/files"), Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty, json!({"files": [], "more": false}));
+
+        std::fs::create_dir(folder.join("notes")).unwrap();
+        std::fs::write(folder.join("notes/b.md"), "bee").unwrap();
+        std::fs::write(folder.join("a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("covalent.db"), folder.join("link")).unwrap();
+        let (_, listed) = call(&app, "GET", &format!("/api/chats/{id}/files"), Value::Null).await;
+        let files: Vec<_> = listed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["path"].as_str().unwrap(), f["size"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(files, [("a.txt", 1), ("notes/b.md", 3)]);
+        assert!(listed["files"][0]["modified_at_ms"].as_i64().unwrap() > 0);
+
+        for n in 0..crate::files::MAX_LISTED {
+            std::fs::write(folder.join(format!("many-{n:03}.txt")), "").unwrap();
+        }
+        let (_, listed) = call(&app, "GET", &format!("/api/chats/{id}/files"), Value::Null).await;
+        let files = listed["files"].as_array().unwrap();
+        assert_eq!(files.len(), crate::files::MAX_LISTED);
+        assert_eq!(listed["more"], true);
+        assert_eq!(files[0]["path"], "a.txt");
+
+        let (status, _) = call(&app, "GET", "/api/chats/missing/files", Value::Null).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

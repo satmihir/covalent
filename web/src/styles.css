@@ -116,7 +116,8 @@ button {
   color: var(--muted);
 }
 
-.icon-button:hover {
+.icon-button:hover,
+.icon-button.active {
   background: var(--hover);
   color: var(--text);
 }
@@ -506,8 +507,173 @@ button {
   text-underline-offset: 3px;
 }
 
-.action a:hover {
+.action a:hover,
+.action-open:hover {
   color: var(--text);
+}
+
+.action-open {
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* Files panel */
+
+.files {
+  width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+}
+
+.files-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 52px;
+  flex-shrink: 0;
+  padding: 0 8px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.files-head .icon-button:first-child {
+  margin-left: -8px;
+}
+
+.files-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.files-note {
+  margin: 0;
+  padding: 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.file-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+}
+
+.file-list button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-list button:hover {
+  background: var(--hover);
+}
+
+.file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-mark {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.file-size {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.file-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+}
+
+.file-view.text {
+  padding: 14px 16px;
+  background: var(--code-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.file-view.picture {
+  padding: 16px;
+}
+
+.file-view.picture img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 8px;
+}
+
+.file-view.other {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.file-view.other p {
+  margin: 0 0 12px;
+}
+
+.file-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.file-download:hover {
+  background: var(--hover);
 }
 
 .action.failed {
@@ -1103,6 +1269,14 @@ button {
 
   .sidebar.open {
     transform: none;
+  }
+
+  .files {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    width: auto;
+    border-left: 0;
   }
 
   .scrim.visible {

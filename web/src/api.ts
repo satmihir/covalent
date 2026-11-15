@@ -32,6 +32,12 @@ export type Action = {
   error: string | null;
 };
 
+/** File is one file in a chat's folder. */
+export type File = { path: string; size: number; modified_at_ms: number };
+
+/** Listing is a chat's files in path order; more says some were left out. */
+export type Listing = { files: File[]; more: boolean };
+
 export type Message = {
   id: string;
   chat_id: string;
@@ -130,6 +136,7 @@ export const api = {
     }
     return data.text as string;
   },
+  files: (id: string) => request<Listing>("GET", `/api/chats/${id}/files`),
   imageUrl: (name: string) => `/api/images/${name}`,
   fileUrl: (chatId: string, path: string) =>
     `/api/chats/${chatId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,

@@ -15,7 +15,9 @@ import type { Reply } from "./voiceLoop";
 
 // Voice mode brings a speech detector and ONNX Runtime; they load when it is first opened.
 const Voice = lazy(() => import("./Voice").then((m) => ({ default: m.Voice })));
-import { MenuIcon, NewChatIcon } from "./icons";
+import { Files } from "./Files";
+import { touched } from "./fileView";
+import { FolderIcon, MenuIcon, NewChatIcon } from "./icons";
 import { ModelPicker } from "./ModelPicker";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./Thread";
@@ -93,6 +95,9 @@ export function App() {
   // Voice mode replaces the composer; voiceReply is the reply it is waiting on or reading.
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceReply, setVoiceReply] = useState<string | null>(null);
+  // The files panel stays open from chat to chat; the file it shows belongs to one chat.
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [file, setFile] = useState<string | null>(null);
   // Voice mode asks about replies from callbacks, between renders.
   const messagesRef = useRef<Message[]>([]);
   messagesRef.current = messages;
@@ -119,6 +124,7 @@ export function App() {
       setSidebarOpen(false);
       stopSpeaking();
       setVoiceMode(false);
+      setFile(null);
     },
     [showPreviews, stopSpeaking],
   );
@@ -357,6 +363,15 @@ export function App() {
   const empty = !chatId && messages.length === 0;
   const archived = openChat?.archived_at_ms != null;
   const model = chatId ? (openChat?.model ?? null) : (newModel ?? defaultModel);
+  const folder = chatId && openChat?.workspace ? chatId : null;
+  // The latest reply's work marks the files it changed and refreshes the panel as it goes.
+  const reply = [...messages].reverse().find((m) => m.role === "assistant");
+  const work = (reply?.status === "pending" ? previews[reply.id]?.activity : reply?.activity) ?? [];
+  const refresh = `${reply?.id}:${reply?.status}:${work.map((a) => a.state).join()}`;
+  const openFile = (path: string) => {
+    setFile(path);
+    setFilesOpen(true);
+  };
 
   return (
     <div className="app">
@@ -381,6 +396,17 @@ export function App() {
             onChange={(m) => void chooseModel(m)}
           />
           <span className="topbar-title">{chatId ? (title ?? "New chat") : ""}</span>
+          {folder && (
+            <button
+              className={`icon-button ${filesOpen ? "active" : ""}`}
+              onClick={() => setFilesOpen(!filesOpen)}
+              aria-label="Files"
+              aria-pressed={filesOpen}
+              title="Files"
+            >
+              <FolderIcon />
+            </button>
+          )}
           <button className="icon-button mobile-only" onClick={() => open(null)} aria-label="New chat">
             <NewChatIcon />
           </button>
@@ -395,6 +421,7 @@ export function App() {
             messages={messages}
             previews={previews}
             fileUrl={(path) => (openChat?.workspace && chatId ? api.fileUrl(chatId, path) : api.imageUrl(path))}
+            onOpenFile={folder ? openFile : undefined}
             onRetry={archived ? undefined : retry}
             onSpeak={voice && !voiceMode ? speak : undefined}
             speaking={speaking}
@@ -440,6 +467,16 @@ export function App() {
           <p className="footnote">Covalent runs on re:agent. Replies can be wrong, so check what matters.</p>
         </div>
       </main>
+      {folder && filesOpen && (
+        <Files
+          chatId={folder}
+          refresh={refresh}
+          marked={touched(work)}
+          selected={file}
+          onSelect={setFile}
+          onClose={() => setFilesOpen(false)}
+        />
+      )}
     </div>
   );
 }

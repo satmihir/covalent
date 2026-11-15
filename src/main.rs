@@ -1,5 +1,6 @@
 mod activity;
 mod chats;
+mod files;
 mod http;
 mod speakable;
 mod speech;

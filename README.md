@@ -86,9 +86,16 @@ Each new chat has a folder of its own, `workspaces/<name>/` in Covalent's data
 folder, and its model can list, read, search, create, edit and delete files
 there with re:agent's file tools. Ask for a file ("write a packing list as
 Markdown", "add sunscreen to it") and the reply lists what the model did, each
-call as one row while it works, folded to one line afterwards. A row for a
-file the model wrote links to it: pictures open in the page, anything else
-downloads, so a file the model wrote can never run as part of Covalent.
+call as one row while it works, folded to one line afterwards.
+
+The folder button in a chat's header opens the files panel beside the thread.
+It lists the chat's files (the first 500, in path order), marks the ones the
+latest reply created or changed, and refreshes as a reply works. Clicking a
+file shows it: pictures as pictures, text files up to 1 MiB as plain text, and
+anything else as a name and size to download. Every file has a download
+button, and a row in a reply's activity opens its file in the panel. Files are
+never shown as web pages: HTML appears as text, and a file fetched directly is
+a download, so a file the model wrote can never run as part of Covalent.
 
 A chat cannot run programs or commands, and its file tools stay inside its own
 folder. One reply can make at most 40 tool calls in 30 model requests. Web

@@ -7,7 +7,7 @@ use reagent::session_api::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -645,7 +645,7 @@ impl Chats {
     fn saved_image(&self, chat_id: &str, name: &str) -> Option<Image> {
         let chat = self.store.lock().unwrap().chat(chat_id).ok()??;
         let path = match self.launch.workspace(&chat) {
-            Some(folder) => inside(&folder, name)?,
+            Some(folder) => crate::files::inside(&folder, name)?,
             None => self.launch.data.join("images").join(image_name(name)?),
         };
         let bytes = std::fs::read(path).ok()?;
@@ -669,6 +669,20 @@ impl Chats {
         std::fs::read(self.launch.data.join("images").join(name)).map_err(|_| missing())
     }
 
+    /// Files lists a chat's folder; a chat from before folders has none.
+    pub fn files(&self, chat_id: &str) -> Result<crate::files::Listing, Failure> {
+        let missing = || Failure::new(404, "not_found", "This chat has no folder.");
+        let chat = self
+            .store
+            .lock()
+            .unwrap()
+            .chat(chat_id)?
+            .ok_or_else(missing)?;
+        let folder = self.launch.workspace(&chat).ok_or_else(missing)?;
+        crate::files::list(&folder)
+            .map_err(|e| Failure::new(500, "workspace", format!("list the chat's folder: {e}")))
+    }
+
     /// File returns one file from a chat's folder, refusing any path that leaves it.
     pub fn file(&self, chat_id: &str, path: &str) -> Result<Vec<u8>, Failure> {
         let missing = || Failure::new(404, "not_found", "no such file");
@@ -679,7 +693,7 @@ impl Chats {
             .chat(chat_id)?
             .ok_or_else(missing)?;
         let folder = self.launch.workspace(&chat).ok_or_else(missing)?;
-        let path = inside(&folder, path).ok_or_else(missing)?;
+        let path = crate::files::inside(&folder, path).ok_or_else(missing)?;
         std::fs::read(path).map_err(|_| missing())
     }
 
@@ -736,14 +750,6 @@ fn read_activity(
             return changed;
         }
     }
-}
-
-/// Inside resolves a relative path within a folder, refusing one that leaves it, through `..`
-/// or a symbolic link, and anything that is not a file.
-fn inside(folder: &Path, relative: &str) -> Option<PathBuf> {
-    let folder = folder.canonicalize().ok()?;
-    let path = folder.join(relative).canonicalize().ok()?;
-    (path.starts_with(&folder) && path.is_file()).then_some(path)
 }
 
 /// Image_name accepts only the file names re:agent gives generated images.

@@ -10,6 +10,8 @@ type Props = {
   previews: Record<string, Preview>;
   /** fileUrl is where one of the chat's files, or an older chat's picture, is served. */
   fileUrl: (path: string) => string;
+  /** onOpenFile shows one of the chat's files in the files panel; older chats have none. */
+  onOpenFile?: (path: string) => void;
   /** onRetry is absent when the chat cannot take messages, as when it is archived. */
   onRetry?: (message: Message) => void;
   /** onSpeak reads a finished reply aloud, or stops it; it is absent without voice. */
@@ -131,17 +133,18 @@ function opens(action: Action): boolean {
   return action.state === "done" && !!action.target && ["write_file", "edit_file", "generate_image"].includes(action.tool);
 }
 
-function ActionRow({ action, fileUrl }: { action: Action; fileUrl: (path: string) => string }) {
+function ActionRow({ action, onOpenFile }: { action: Action; onOpenFile?: (path: string) => void }) {
   const text = label(action);
+  const target = action.target;
   return (
     <li className={`action ${action.state}`} title={action.error ?? undefined}>
       <span className="action-mark" aria-hidden>
         {action.state === "done" ? <CheckIcon /> : action.state === "failed" ? <CloseIcon /> : <span className="action-spinner" />}
       </span>
-      {opens(action) && action.target ? (
-        <a href={fileUrl(action.target)} target="_blank" rel="noreferrer">
+      {onOpenFile && opens(action) && target ? (
+        <button className="action-open" onClick={() => onOpenFile(target)}>
           {text}
-        </a>
+        </button>
       ) : (
         <span>{text}</span>
       )}
@@ -149,8 +152,10 @@ function ActionRow({ action, fileUrl }: { action: Action; fileUrl: (path: string
   );
 }
 
+type ActivityProps = { actions: Action[]; live: boolean; onOpenFile?: (path: string) => void };
+
 /** Activity lists a reply's tool calls: all of them while it works, folded to one line after. */
-function Activity({ actions, live, fileUrl }: { actions: Action[]; live: boolean; fileUrl: (path: string) => string }) {
+function Activity({ actions, live, onOpenFile }: ActivityProps) {
   const [open, setOpen] = useState(false);
   const failed = actions.filter((a) => a.state === "failed").length;
   const summary =
@@ -158,7 +163,7 @@ function Activity({ actions, live, fileUrl }: { actions: Action[]; live: boolean
   const rows = (
     <ul className="actions">
       {actions.map((action) => (
-        <ActionRow key={action.call_id} action={action} fileUrl={fileUrl} />
+        <ActionRow key={action.call_id} action={action} onOpenFile={onOpenFile} />
       ))}
     </ul>
   );
@@ -219,7 +224,7 @@ function ReadAloud({ active, onClick }: { active: boolean; onClick: () => void }
   );
 }
 
-export function Thread({ chatId, messages, previews, fileUrl, onRetry, onSpeak, speaking }: Props) {
+export function Thread({ chatId, messages, previews, fileUrl, onOpenFile, onRetry, onSpeak, speaking }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
 
@@ -254,14 +259,14 @@ export function Thread({ chatId, messages, previews, fileUrl, onRetry, onSpeak, 
               previews[m.id] &&
               (previews[m.id].text || previews[m.id].searching || previews[m.id].generating || previews[m.id].activity.length > 0) ? (
                 <>
-                  {previews[m.id].activity.length > 0 && <Activity actions={previews[m.id].activity} live fileUrl={fileUrl} />}
+                  {previews[m.id].activity.length > 0 && <Activity actions={previews[m.id].activity} live onOpenFile={onOpenFile} />}
                   {previews[m.id].generating && <Generating />}
                   {previews[m.id].text && <Reply text={previews[m.id].text} />}
                   {previews[m.id].searching && <Searching />}
                 </>
               ) : (
                 <>
-                  {m.activity.length > 0 && <Activity actions={m.activity} live={false} fileUrl={fileUrl} />}
+                  {m.activity.length > 0 && <Activity actions={m.activity} live={false} onOpenFile={onOpenFile} />}
                   {m.images.length > 0 && <Images images={m.images} fileUrl={fileUrl} />}
                   {m.text && <Reply text={m.text} />}
                   {m.status === "complete" && m.sources.length > 0 && <Sources sources={m.sources} />}
