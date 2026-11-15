@@ -679,6 +679,109 @@ button {
   cursor: default;
 }
 
+/* Voice mode */
+
+.voice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 0 6px;
+}
+
+.voice-orb {
+  width: 76px;
+  height: 76px;
+  border: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #93c5fd, var(--accent) 60%, #1e40af);
+  box-shadow: 0 6px 24px rgba(37, 99, 235, 0.3);
+  transition: transform 0.12s ease-out, opacity 0.2s;
+}
+
+.voice-orb:disabled {
+  cursor: default;
+}
+
+.voice-orb.starting,
+.voice-orb.muted {
+  opacity: 0.35;
+}
+
+.voice-orb.transcribing,
+.voice-orb.thinking {
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
+.voice-orb.speaking {
+  cursor: pointer;
+  animation: speak 0.9s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes speak {
+  50% {
+    transform: scale(1.1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb {
+    animation: none !important;
+    transition: none;
+  }
+}
+
+.voice-status {
+  margin: 0;
+  min-height: 20px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.voice-loading {
+  padding: 40px 0;
+  text-align: center;
+}
+
+.voice-controls {
+  display: flex;
+  gap: 12px;
+}
+
+.voice-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.voice-button:hover:not(:disabled),
+.voice-button.active {
+  background: var(--hover);
+}
+
+.voice-button.end {
+  border-color: transparent;
+  background: var(--button);
+  color: var(--button-text);
+}
+
+.voice-button.end:hover {
+  background: var(--button);
+  opacity: 0.85;
+}
+
 .footnote {
   margin: 8px 0 0;
   text-align: center;

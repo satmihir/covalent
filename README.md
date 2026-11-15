@@ -59,6 +59,17 @@ Markdown, no URLs, and code blocks and tables replaced by a short spoken note
 (OpenAI `gpt-realtime-2.1-mini`, voice `marin`). Without the key the buttons do
 not appear.
 
+**Voice mode** is the button in place of Send while the message box is empty.
+It listens, sends what you say when you pause, and reads the reply aloud as it
+is written; the thread shows the same conversation as text. A spoken message
+asks the model for a short reply without Markdown, so a typed message in the
+same chat still gets formatting. Talk over a reply, or tap the circle, to stop
+it: a reply still being written is cancelled. Ending voice mode lets a reply in
+progress finish as text. Pauses are found in the browser by a speech detector
+(Silero, through `@ricky0123/vad-web` and ONNX Runtime), whose files Covalent
+serves itself under `/vad/`; voice mode loads them the first time it opens.
+Use headphones if the reply's sound makes it stop itself.
+
 Voice sends recordings, and the text of each reply read aloud, to OpenAI, also
 in chats whose model is Claude. It is billed to the API key, apart from any
 ChatGPT plan: roughly half a cent per minute dictated and three cents per minute
@@ -87,11 +98,12 @@ cargo fmt --check && cargo test
 ```
 
 ```bash
-cd web && npm run typecheck
+cd web && npm run typecheck && npm test
 ```
 
-The Rust tests run offline with scripted re:agent Sessions and a temporary
-HOME. The frontend has no automated tests; check it in a browser against the
+The Rust tests run offline with scripted re:agent Sessions, fake providers and
+a temporary HOME. `npm test` runs voice mode's turn-taking rules with Node's
+built-in test runner; check the rest of the frontend in a browser against the
 running binary.
 
 ## Developing against a local re:agent

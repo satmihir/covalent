@@ -78,10 +78,12 @@ export const api = {
   switchModel: (id: string, model: string) =>
     request<{ chat: Chat }>("POST", `/api/chats/${id}/model`, { model }).then((d) => d.chat),
   archive: (id: string) => request<object>("POST", `/api/chats/${id}/archive`),
-  send: (id: string, requestId: string, text: string) =>
+  /** send posts a message; a spoken one asks for a reply meant to be heard. */
+  send: (id: string, requestId: string, text: string, spoken = false) =>
     request<{ messages: Message[] }>("POST", `/api/chats/${id}/messages`, {
       request_id: requestId,
       text,
+      spoken,
     }).then((d) => d.messages),
   cancel: (id: string) => request<object>("POST", `/api/chats/${id}/cancel`),
   /** voice reports whether the server has what dictation and reading aloud need. */

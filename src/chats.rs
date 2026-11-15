@@ -16,6 +16,12 @@ const PROMPT: &str = include_str!("prompt.txt");
 const TITLE_PROMPT: &str = "You write titles for chats. Given the first message of a chat, reply \
     with a title of at most six words and nothing else: no quotes, no trailing punctuation.";
 
+/// SPOKEN is the note a dictated turn carries, so the reply suits being heard.
+const SPOKEN: &str = "The user said this message aloud in voice mode, so it may contain \
+    transcription errors; answer what they most likely meant. Your reply will be read aloud: \
+    answer in short, natural spoken sentences, without Markdown, lists, tables, code or URLs, \
+    and keep it brief unless they ask for detail.";
+
 /// Launch holds the settings every chat Session opens with.
 #[derive(Clone, Debug, Default)]
 pub struct Launch {
@@ -307,11 +313,14 @@ impl Chats {
     }
 
     /// Send admits a user message and returns the chat's messages, ending with the pending reply.
+    /// A spoken message carries a note asking for a reply suited to being heard, in chats
+    /// that can take one: those opened before tool-free chats existed cannot.
     pub fn send(
         self: &Arc<Self>,
         chat_id: &str,
         request_id: &str,
         text: &str,
+        spoken: bool,
     ) -> Result<Vec<Message>, Failure> {
         if text.trim().is_empty() {
             return Err(Failure::new(400, "invalid_argument", "message is empty"));
@@ -326,13 +335,19 @@ impl Chats {
         }
         let first = messages.is_empty();
         let api = self.session(chat_id)?;
-        let run = match api.send_message(request_id, text.as_bytes(), PlanMode::Keep) {
+        let note = (spoken && api.get_snapshot()?.tool_free).then_some(SPOKEN);
+        let submit = |api: &SessionApi| match note {
+            Some(note) => {
+                api.send_message_with_note(request_id, text.as_bytes(), note, PlanMode::Keep)
+            }
+            None => api.send_message(request_id, text.as_bytes(), PlanMode::Keep),
+        };
+        let run = match submit(&api) {
             Err(error) if error.code == "resource_exhausted" => {
                 // One opening keeps every receipt; a fresh opening of the same Session starts empty.
                 api.close()?;
                 self.live.lock().unwrap().remove(chat_id);
-                self.session(chat_id)?
-                    .send_message(request_id, text.as_bytes(), PlanMode::Keep)?
+                submit(&self.session(chat_id)?)?
             }
             other => other?,
         }

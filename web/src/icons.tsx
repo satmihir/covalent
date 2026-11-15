@@ -99,3 +99,27 @@ export function SpeakerIcon() {
     </svg>
   );
 }
+
+export function MicOffIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M15 10.5V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.6 2.5M5.5 11a6.5 6.5 0 0 0 10.4 5.2M18.5 11a6.4 6.4 0 0 1-.6 2.7M12 17.5V21M4 4l16 16" {...stroke} />
+    </svg>
+  );
+}
+
+export function CloseIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 6l12 12M18 6 6 18" {...stroke} strokeWidth={2} />
+    </svg>
+  );
+}
+
+export function VoiceIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2" {...stroke} strokeWidth={2} />
+    </svg>
+  );
+}

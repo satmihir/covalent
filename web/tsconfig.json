@@ -9,6 +9,8 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "isolatedModules": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "types": ["vite/client"]
   },

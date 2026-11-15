@@ -47,15 +47,45 @@ export type Playback = {
   done: Promise<void>;
 };
 
-/** Play fetches a speech stream and schedules each chunk right after the one before it. */
-export function play(url: string): Playback {
-  const context = new AudioContext();
+/** Wav packs 16-bit mono samples between -1 and 1 into a WAV file. */
+export function wav(samples: Float32Array, rate: number): Blob {
+  const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+  const ascii = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  ascii(8, "WAVE");
+  ascii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  samples.forEach((sample, i) => {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(44 + i * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+  });
+  return new Blob([view.buffer], { type: "audio/wav" });
+}
+
+/** Play fetches a speech stream and schedules each chunk right after the one before it;
+ *  onAudio runs once, when the first chunk is scheduled. Without a `shared` context it makes
+ *  its own, which must happen during a click; voice mode passes one made when it started. */
+export function play(url: string, onAudio?: () => void, shared?: AudioContext): Playback {
+  const context = shared ?? new AudioContext();
   const abort = new AbortController();
+  const sources: AudioBufferSourceNode[] = [];
   let stopped = false;
   let wake = () => {};
   const stop = () => {
     stopped = true;
     abort.abort();
+    sources.forEach((source) => source.stop());
     wake();
   };
 
@@ -73,7 +103,7 @@ export function play(url: string): Playback {
     let last: AudioBufferSourceNode | null = null;
     for (;;) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done || stopped) break;
       // A chunk may split a sample; its first byte waits for the next chunk.
       let bytes = value;
       if (carry !== null) {
@@ -99,7 +129,9 @@ export function play(url: string): Playback {
       next = Math.max(next, context.currentTime + 0.05);
       source.start(next);
       next += buffer.duration;
+      if (!last) onAudio?.();
       last = source;
+      sources.push(source);
     }
     if (last && !stopped) {
       const ended = last;
@@ -114,6 +146,8 @@ export function play(url: string): Playback {
     .catch((error) => {
       if (!stopped) throw error;
     })
-    .finally(() => void context.close());
+    .finally(() => {
+      if (!shared) void context.close();
+    });
   return { stop, done };
 }

@@ -57,6 +57,9 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
 struct SendBody {
     request_id: String,
     text: String,
+    /// spoken marks a turn said aloud in voice mode, whose reply will be read aloud.
+    #[serde(default)]
+    spoken: bool,
 }
 
 impl IntoResponse for Failure {
@@ -140,7 +143,7 @@ async fn send(
     Json(body): Json<SendBody>,
 ) -> impl IntoResponse {
     blocking(move || {
-        let messages = chats.send(&id, &body.request_id, &body.text)?;
+        let messages = chats.send(&id, &body.request_id, &body.text, body.spoken)?;
         Ok(json!({"messages": messages}))
     })
     .await
@@ -421,7 +424,8 @@ mod tests {
 
     /// Stream_provider answers Responses requests on a loopback port: title requests at once,
     /// and the chat reply as a web search that ends once the `searched` file next to the release
-    /// file exists, then "Sourdough", then " rises." once the release file exists.
+    /// file exists, then "Sourdough", then " rises." once the release file exists. Each chat
+    /// request's input is appended as one line to `requests.log` next to the release file.
     fn stream_provider(release: std::path::PathBuf) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -480,6 +484,12 @@ mod tests {
                         send(done("Baking Bread", false));
                         return;
                     }
+                    let mut log = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(release.with_file_name("requests.log"))
+                        .unwrap();
+                    writeln!(log, "{}", body["input"]).unwrap();
                     if !body["tools"]
                         .as_array()
                         .is_some_and(|tools| tools.contains(&json!({"type":"web_search"})))
@@ -1121,5 +1131,78 @@ mod tests {
         // The unfinished sentence waited for the rest of the reply and was read once, whole.
         assert_eq!(&audio[..], b"Sourdough rises.|");
         assert_eq!(spoken(&seen).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_spoken_turn_asks_for_a_reply_meant_to_be_heard_and_a_typed_one_does_not() {
+        let release = tempfile::tempdir().unwrap();
+        let release_file = release.path().join("release");
+        std::fs::write(&release_file, b"").unwrap();
+        std::fs::write(release.path().join("searched"), b"").unwrap();
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release_file.clone()),
+            ),
+            ("COVALENT_TEST_RELEASE", release_file.display().to_string()),
+        ];
+        if !isolated(
+            "http::tests::a_spoken_turn_asks_for_a_reply_meant_to_be_heard_and_a_typed_one_does_not",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let launch = Launch {
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some("low".into()),
+            ..Launch::default()
+        };
+        let chats = Chats::new(
+            Store::open(&dir.path().join("covalent.db")).unwrap(),
+            launch,
+        );
+        let app = router(chats, None, &dir.path().join("web"));
+        let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
+        let id = created["chat"]["id"].as_str().unwrap().to_owned();
+        let uri = format!("/api/chats/{id}/messages");
+        let spoken = json!({"request_id": "r1", "text": "what rises", "spoken": true});
+        call(&app, "POST", &uri, spoken).await;
+        settled(&app, &id).await;
+        call(
+            &app,
+            "POST",
+            &uri,
+            json!({"request_id": "r2", "text": "and typed"}),
+        )
+        .await;
+        settled(&app, &id).await;
+
+        let release = PathBuf::from(std::env::var("COVALENT_TEST_RELEASE").unwrap());
+        let log = std::fs::read_to_string(release.with_file_name("requests.log")).unwrap();
+        let inputs: Vec<Value> = log
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(inputs.len(), 2, "{log}");
+        let note = "The user said this message aloud in voice mode";
+        assert_eq!(
+            inputs[0].to_string().matches(note).count(),
+            1,
+            "{}",
+            inputs[0]
+        );
+        // The typed turn carries no note; only the earlier spoken one in history does.
+        assert_eq!(
+            inputs[1].to_string().matches(note).count(),
+            1,
+            "{}",
+            inputs[1]
+        );
+        let last = inputs[1].as_array().unwrap().last().unwrap().to_string();
+        assert!(last.contains("and typed") && !last.contains(note), "{last}");
+        let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+        assert_eq!(body["messages"][0]["text"], "what rises");
     }
 }

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, describe } from "./api";
 import { record, type Recording } from "./audio";
-import { ArrowUpIcon, MicIcon, StopIcon } from "./icons";
+import { ArrowUpIcon, MicIcon, StopIcon, VoiceIcon } from "./icons";
 
 type Props = {
   value: string;
@@ -10,8 +10,9 @@ type Props = {
   onChange: (value: string) => void;
   onSend: (text: string) => void;
   onStop: () => void;
-  /** voice shows the dictation button. */
+  /** voice shows the dictation button, and the voice mode button while the draft is empty. */
   voice: boolean;
+  onVoiceMode: () => void;
   onError: (text: string) => void;
 };
 
@@ -25,7 +26,7 @@ function microphoneError(error: unknown): string {
   return describe(error);
 }
 
-export function Composer({ value, running, focusKey, onChange, onSend, onStop, voice, onError }: Props) {
+export function Composer({ value, running, focusKey, onChange, onSend, onStop, voice, onVoiceMode, onError }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
   const empty = value.trim() === "";
   const [dictation, setDictation] = useState<Dictation>("idle");
@@ -129,6 +130,10 @@ export function Composer({ value, running, focusKey, onChange, onSend, onStop, v
       {running ? (
         <button type="button" className="send-button" onClick={onStop} aria-label="Stop reply" title="Stop">
           <StopIcon />
+        </button>
+      ) : voice && empty && dictation === "idle" ? (
+        <button type="button" className="send-button" onClick={onVoiceMode} aria-label="Start voice mode" title="Voice mode">
+          <VoiceIcon />
         </button>
       ) : (
         <button type="submit" className="send-button" disabled={empty} aria-label="Send message" title="Send">

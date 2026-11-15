@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   describe,
@@ -11,6 +11,10 @@ import {
 } from "./api";
 import { play, type Playback } from "./audio";
 import { Composer } from "./Composer";
+import type { Reply } from "./voiceLoop";
+
+// Voice mode brings a speech detector and ONNX Runtime; they load when it is first opened.
+const Voice = lazy(() => import("./Voice").then((m) => ({ default: m.Voice })));
 import { MenuIcon, NewChatIcon } from "./icons";
 import { ModelPicker } from "./ModelPicker";
 import { Sidebar } from "./Sidebar";
@@ -86,6 +90,12 @@ export function App() {
   const [voice, setVoice] = useState(false);
   const [speaking, setSpeaking] = useState<string | null>(null);
   const playback = useRef<Playback | null>(null);
+  // Voice mode replaces the composer; voiceReply is the reply it is waiting on or reading.
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [voiceReply, setVoiceReply] = useState<string | null>(null);
+  // Voice mode asks about replies from callbacks, between renders.
+  const messagesRef = useRef<Message[]>([]);
+  messagesRef.current = messages;
 
   const stopSpeaking = useCallback(() => {
     playback.current?.stop();
@@ -108,6 +118,7 @@ export function App() {
       setNotice(null);
       setSidebarOpen(false);
       stopSpeaking();
+      setVoiceMode(false);
     },
     [showPreviews, stopSpeaking],
   );
@@ -219,7 +230,8 @@ export function App() {
     };
   }, [resync, flushPreviews, showPreviews]);
 
-  const send = async (text: string) => {
+  /** Send posts a message, creating the chat first if needed, and returns where its reply is. */
+  const send = async (text: string, spoken = false): Promise<Reply | null> => {
     const requestId = crypto.randomUUID();
     const now = Date.now();
     const optimistic: Message[] = [
@@ -241,15 +253,37 @@ export function App() {
         setChatId(id);
         history.pushState(null, "", `/c/${id}`);
       }
-      const server = await api.send(id, requestId, text);
+      const server = await api.send(id, requestId, text, spoken);
       if (current.current === id) setMessages((list) => reconcile(server, list));
       setChats((list) => bump(list, id!));
+      const reply = server[server.length - 1];
+      return reply?.role === "assistant" ? { chatId: id, replyId: reply.id } : null;
     } catch (error) {
-      if (current.current !== id) return;
+      if (current.current !== id) return null;
       setMessages((list) => list.filter((m) => !isOptimistic(m)));
-      setDraft(text);
+      if (!spoken) setDraft(text);
       setNotice({ text: describe(error), tone: "error" });
+      return null;
     }
+  };
+
+  const sendSpoken = async (text: string) => {
+    const reply = await send(text, true);
+    if (reply) setVoiceReply(reply.replyId);
+    return reply;
+  };
+
+  /** Pending reports whether a reply is unfinished; one not shown yet was only just sent. */
+  const pending = (replyId: string) => {
+    const reply = messagesRef.current.find((m) => m.id === replyId);
+    return reply ? reply.status === "pending" : true;
+  };
+
+  const startVoiceMode = () => {
+    stopSpeaking();
+    setNotice(null);
+    setVoiceReply(null);
+    setVoiceMode(true);
   };
 
   const chooseModel = async (model: string) => {
@@ -352,7 +386,7 @@ export function App() {
             messages={messages}
             previews={previews}
             onRetry={archived ? undefined : retry}
-            onSpeak={voice ? speak : undefined}
+            onSpeak={voice && !voiceMode ? speak : undefined}
             speaking={speaking}
           />
         )}
@@ -369,6 +403,17 @@ export function App() {
             <p className="archived-note">
               This chat is archived. Continue it in a terminal with <code>reagent --resume {chatId}</code>
             </p>
+          ) : voiceMode ? (
+            <Suspense fallback={<p className="voice-status voice-loading">Starting voice mode…</p>}>
+              <Voice
+              send={sendSpoken}
+              pending={pending}
+              cancel={(id) => void api.cancel(id).catch(() => {})}
+              searching={voiceReply !== null && previews[voiceReply]?.searching === true}
+              onError={(text) => setNotice({ text, tone: "error" })}
+              onClose={() => setVoiceMode(false)}
+              />
+            </Suspense>
           ) : (
             <Composer
               value={draft}
@@ -378,6 +423,7 @@ export function App() {
               onSend={send}
               onStop={stop}
               voice={voice}
+              onVoiceMode={startVoiceMode}
               onError={(text) => setNotice({ text, tone: "error" })}
             />
           )}

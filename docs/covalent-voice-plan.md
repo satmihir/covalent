@@ -19,6 +19,26 @@ Markdown or the URL. In the browser, read aloud scheduled all 38.4 s of audio
 and Stop closed it; dictation, fed a synthetic microphone stream, filled the
 composer. A real microphone, and how the voice sounds, are still unchecked.
 
+Milestone 8 is done: re:agent [#289](https://github.com/satmihir/re-agent/pull/289)
+merged as `c902b960`, and Covalent pins it. Open points 1, 3 and 6 were settled
+as recommended: a per-message note
+(`send_message_with_note`), interrupting cancels a reply still being written,
+and a search is shown, not spoken. As built: the turn-taking rules live in
+`web/src/voiceLoop.ts`, tested with Node's built-in runner and no new tooling;
+voice mode's code and its speech detector load only when it first opens;
+ending voice mode lets a reply in progress finish as text; and a speech stream
+that ends while its reply is still pending is asked for again at most five
+times.
+
+Checked live with a synthetic microphone stream of recorded questions: a
+spoken question was answered in one plain sentence and read aloud; talking over
+a long story stopped it within half a second and cancelled it, and the next
+question was answered; a typed turn in the same chat got Markdown again. From
+the end of speech to first sound took about 5.8 s, not the 3 s hoped for: 0.8 s
+to decide the turn ended, 1.5 s to transcribe, and 3.5 s for the chat model's
+first sentence plus the speech model's first audio. Echo from speakers into the
+microphone could not be checked.
+
 ## Goal
 
 Talk to a chat and hear it answer, the way ChatGPT's standard voice mode works:
