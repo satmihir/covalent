@@ -35,7 +35,7 @@ cd web && npm run dev
 | `COVALENT_PORT` | `7420` | Loopback port to listen on. |
 | `COVALENT_DATA_DIR` | `~/.covalent` | Where the chat store lives. |
 | `COVALENT_WEB_DIR` | `web/dist` | The built frontend. |
-| `COVALENT_MODEL`, `COVALENT_EFFORT` | re:agent's defaults | Model and reasoning effort for chats. |
+| `COVALENT_MODEL`, `COVALENT_EFFORT` | `gpt-6-sol` with OpenAI credentials, else re:agent's default; the model's own effort | Model and reasoning effort for new chats whose model was not picked. |
 | `COVALENT_TITLE_MODEL`, `COVALENT_TITLE_EFFORT` | re:agent's defaults | Model and effort for writing titles. |
 | `COVALENT_HOSTS` | none | Extra host names to answer to, separated by commas, such as a Tailscale name. |
 
@@ -192,7 +192,9 @@ before chats had folders stay in `images/` in the data folder.
 ## Models and archiving
 
 The model picker offers the catalog models whose provider has credentials
-here. A new chat uses the model picked before its first message; switching an
+here. A new chat uses the model picked before its first message, or GPT-6 Sol
+when none was: it starts answering seconds sooner than 6.1 Sol, which voice
+mode feels most. The page remembers the last model you picked; switching an
 existing chat carries its history over to the new model. A ChatGPT plan does
 not serve every catalog model; a model it refuses fails on the first reply.
 

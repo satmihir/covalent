@@ -1162,7 +1162,7 @@ dependencies = [
 [[package]]
 name = "reagent"
 version = "0.1.0"
-source = "git+https://github.com/satmihir/re-agent?rev=5584c8d47c42e6ff42cadd7ed0f71f040aea9590#5584c8d47c42e6ff42cadd7ed0f71f040aea9590"
+source = "git+https://github.com/satmihir/re-agent?rev=6e773ece5735eab21ed53f1c70c9f43e0fb06510#6e773ece5735eab21ed53f1c70c9f43e0fb06510"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1586,7 +1586,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

@@ -17,6 +17,15 @@ async fn main() {
     }
 }
 
+/// Default_model is GPT-6 Sol where its credentials are here: it starts answering seconds
+/// sooner than 6.1 Sol, which voice mode feels most. Otherwise re:agent picks.
+fn default_model() -> Option<String> {
+    let mut config = serde_json::json!({ "model": "gpt-6-sol" });
+    reagent::provider::configure(&mut config)
+        .ok()
+        .map(|_| "gpt-6-sol".to_owned())
+}
+
 async fn serve() -> Result<(), String> {
     let data = match std::env::var_os("COVALENT_DATA_DIR") {
         Some(dir) => PathBuf::from(dir),
@@ -27,7 +36,7 @@ async fn serve() -> Result<(), String> {
         store::Store::open(&data.join("covalent.db")).map_err(|e| format!("open store: {e}"))?;
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let launch = chats::Launch {
-        model: env("COVALENT_MODEL"),
+        model: env("COVALENT_MODEL").or_else(default_model),
         effort: env("COVALENT_EFFORT"),
         title_model: env("COVALENT_TITLE_MODEL"),
         title_effort: env("COVALENT_TITLE_EFFORT"),
