@@ -32,11 +32,14 @@ export type Action = {
   error: string | null;
 };
 
-/** File is one file in a chat's folder. */
-export type File = { path: string; size: number; modified_at_ms: number };
+/** Attachment is a file the user sent with a message, saved in the chat's folder. */
+export type Attachment = { path: string; size: number };
+
+/** FolderFile is one file in a chat's folder. */
+export type FolderFile = { path: string; size: number; modified_at_ms: number };
 
 /** Listing is a chat's files in path order; more says some were left out. */
-export type Listing = { files: File[]; more: boolean };
+export type Listing = { files: FolderFile[]; more: boolean };
 
 export type Message = {
   id: string;
@@ -52,6 +55,8 @@ export type Message = {
   images: Image[];
   /** activity lists the tool calls a reply made. */
   activity: Action[];
+  /** attachments lists the files the user sent with a message. */
+  attachments: Attachment[];
 };
 
 /** Preview is a pending reply's text so far, numbered by its latest preview event. */
@@ -114,13 +119,30 @@ export const api = {
   switchModel: (id: string, model: string) =>
     request<{ chat: Chat }>("POST", `/api/chats/${id}/model`, { model }).then((d) => d.chat),
   archive: (id: string) => request<object>("POST", `/api/chats/${id}/archive`),
-  /** send posts a message; a spoken one asks for a reply meant to be heard. */
-  send: (id: string, requestId: string, text: string, spoken = false) =>
+  /** send posts a message, naming files already uploaded; a spoken one asks for a reply meant
+   *  to be heard. */
+  send: (id: string, requestId: string, text: string, spoken = false, attachments: string[] = []) =>
     request<{ messages: Message[] }>("POST", `/api/chats/${id}/messages`, {
       request_id: requestId,
       text,
       spoken,
+      attachments,
     }).then((d) => d.messages),
+  /** upload saves a file in the chat's folder and returns the path it was given, which may be
+   *  numbered to keep an existing file. */
+  upload: async (id: string, file: File): Promise<Attachment> => {
+    const response = await fetch(`/api/chats/${id}/files/${encodeURIComponent(file.name)}`, {
+      method: "PUT",
+      headers: { "content-type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = response.status === 413 ? `${file.name} is over the 20 MB limit.` : (data.message ?? `Upload failed (${response.status})`);
+      throw new ApiError(data.error ?? "http", message);
+    }
+    return data as Attachment;
+  },
   cancel: (id: string) => request<object>("POST", `/api/chats/${id}/cancel`),
   /** voice reports whether the server has what dictation and reading aloud need. */
   voice: () => request<{ available: boolean }>("GET", "/api/voice").then((d) => d.available),

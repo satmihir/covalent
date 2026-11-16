@@ -1,7 +1,8 @@
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Action, Image, Message, Preview, Source } from "./api";
+import type { Action, Attachment, Image, Message, Preview, Source } from "./api";
+import { kind, size } from "./fileView";
 import {
   CheckIcon,
   ChevronIcon,
@@ -110,12 +111,49 @@ function Images({ images, fileUrl }: { images: Image[]; fileUrl: (path: string) 
   );
 }
 
+type AttachedProps = {
+  attachments: Attachment[];
+  fileUrl: (path: string) => string;
+  onOpenFile?: (path: string) => void;
+};
+
+/** Attached shows the files a prompt brought: pictures as thumbnails, others as names. Each
+ *  opens in the files panel. */
+function Attached({ attachments, fileUrl, onOpenFile }: AttachedProps) {
+  return (
+    <div className="attached">
+      {attachments.map((a) => {
+        const picture = kind(a.path, a.size) === "picture";
+        const content = picture ? (
+          <img src={fileUrl(a.path)} alt={a.path} />
+        ) : (
+          <>
+            <span className="chip-name">{a.path}</span>
+            <span className="chip-size">{size(a.size)}</span>
+          </>
+        );
+        const className = `attached-item ${picture ? "picture" : "file"}`;
+        return onOpenFile ? (
+          <button key={a.path} className={className} onClick={() => onOpenFile(a.path)} title={a.path}>
+            {content}
+          </button>
+        ) : (
+          <a key={a.path} className={className} href={fileUrl(a.path)} target="_blank" rel="noreferrer" title={a.path}>
+            {content}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 /** VERBS names what each tool does while it works, once done, and in "couldn't …". */
 const VERBS: Record<string, [string, string, string]> = {
   write_file: ["Writing", "Wrote", "write"],
   edit_file: ["Editing", "Edited", "edit"],
   delete_file: ["Deleting", "Deleted", "delete"],
   read_file: ["Reading", "Read", "read"],
+  view_image: ["Looking at", "Looked at", "look at"],
   list_files: ["Listing", "Listed", "list"],
   search_text: ["Searching for", "Searched for", "search for"],
   generate_image: ["Creating", "Created", "create"],
@@ -276,10 +314,13 @@ export function Thread({ chatId, messages, previews, fileUrl, onOpenFile, onRetr
         {messages.map((m) =>
           m.role === "user" ? (
             <div key={m.id} className="row user">
-              <div className="bubble">{m.text}</div>
-              <div className="user-actions">
-                <Copy text={m.text} />
-              </div>
+              {m.attachments.length > 0 && <Attached attachments={m.attachments} fileUrl={fileUrl} onOpenFile={onOpenFile} />}
+              {m.text && <div className="bubble">{m.text}</div>}
+              {m.text && (
+                <div className="user-actions">
+                  <Copy text={m.text} />
+                </div>
+              )}
             </div>
           ) : (
             <div key={m.id} className="row assistant">

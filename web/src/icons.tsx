@@ -166,3 +166,11 @@ export function CopyIcon() {
     </svg>
   );
 }
+
+export function PaperclipIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m20 11.5-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" {...stroke} />
+    </svg>
+  );
+}

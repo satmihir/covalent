@@ -15,6 +15,7 @@ import type { Reply } from "./voiceLoop";
 
 // Voice mode brings a speech detector and ONNX Runtime; they load when it is first opened.
 const Voice = lazy(() => import("./Voice").then((m) => ({ default: m.Voice })));
+import { accept } from "./attachments";
 import { Files } from "./Files";
 import { touched } from "./fileView";
 import { FolderIcon, MenuIcon, NewChatIcon } from "./icons";
@@ -76,6 +77,9 @@ export function App() {
   const [chatId, setChatId] = useState<string | null>(idFromPath);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
+  // Attachments wait here until the message they belong to is sent.
+  const [attached, setAttached] = useState<File[]>([]);
+  const [dropping, setDropping] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // openChat is the open chat as last read, including an archived one the sidebar omits.
@@ -125,6 +129,7 @@ export function App() {
       stopSpeaking();
       setVoiceMode(false);
       setFile(null);
+      setAttached([]);
     },
     [showPreviews, stopSpeaking],
   );
@@ -245,17 +250,23 @@ export function App() {
     };
   }, [resync, flushPreviews, showPreviews]);
 
-  /** Send posts a message, creating the chat first if needed, and returns where its reply is. */
-  const send = async (text: string, spoken = false): Promise<Reply | null> => {
+  /** Send posts a message, creating the chat first if needed, and returns where its reply is.
+   *  New files are uploaded first; files a retried message already sent are named again. */
+  const send = async (
+    text: string,
+    spoken = false,
+    { files = [], paths = [] }: { files?: File[]; paths?: string[] } = {},
+  ): Promise<Reply | null> => {
     const requestId = crypto.randomUUID();
     const now = Date.now();
     const optimistic: Message[] = [
-      { id: requestId, chat_id: chatId ?? "", role: "user", text, status: "complete", reason: null, created_at_ms: now, sources: [], images: [], activity: [] },
-      { id: `local:${requestId}`, chat_id: chatId ?? "", role: "assistant", text: "", status: "pending", reason: null, created_at_ms: now, sources: [], images: [], activity: [] },
+      { id: requestId, chat_id: chatId ?? "", role: "user", text, status: "complete", reason: null, created_at_ms: now, sources: [], images: [], activity: [], attachments: [] },
+      { id: `local:${requestId}`, chat_id: chatId ?? "", role: "assistant", text: "", status: "pending", reason: null, created_at_ms: now, sources: [], images: [], activity: [], attachments: [] },
     ];
     const isOptimistic = (m: Message) => optimistic.some((o) => o.id === m.id);
     setNotice(null);
     setDraft("");
+    setAttached([]);
     setMessages((list) => [...list, ...optimistic]);
     let id = current.current;
     try {
@@ -268,7 +279,11 @@ export function App() {
         setChatId(id);
         history.pushState(null, "", `/c/${id}`);
       }
-      const server = await api.send(id, requestId, text, spoken);
+      const uploaded = [...paths];
+      for (const file of files) {
+        uploaded.push((await api.upload(id, file)).path);
+      }
+      const server = await api.send(id, requestId, text, spoken, uploaded);
       if (current.current === id) setMessages((list) => reconcile(server, list));
       setChats((list) => bump(list, id!));
       const reply = server[server.length - 1];
@@ -277,6 +292,7 @@ export function App() {
       if (current.current !== id) return null;
       setMessages((list) => list.filter((m) => !isOptimistic(m)));
       if (!spoken) setDraft(text);
+      setAttached(files);
       setNotice({ text: describe(error), tone: "error" });
       return null;
     }
@@ -334,7 +350,16 @@ export function App() {
       .slice(0, i)
       .reverse()
       .find((m) => m.role === "user");
-    if (prompt) void send(prompt.text);
+    if (prompt) void send(prompt.text, false, { paths: prompt.attachments.map((a) => a.path) });
+  };
+
+  // Attachments build on the latest list, since a paste and a drop can land before a render.
+  const attach = (incoming: File[]) => {
+    setAttached((current) => {
+      const { files, refused } = accept(current, incoming);
+      if (refused) setNotice({ text: refused, tone: "error" });
+      return files;
+    });
   };
 
   const speak = (reply: Message) => {
@@ -364,6 +389,8 @@ export function App() {
   const archived = openChat?.archived_at_ms != null;
   const model = chatId ? (openChat?.model ?? null) : (newModel ?? defaultModel);
   const folder = chatId && openChat?.workspace ? chatId : null;
+  // A new chat will have a folder; an older one without a folder takes no files.
+  const takesFiles = !archived && !voiceMode && (!chatId || !!openChat?.workspace);
   // The latest reply's work marks the files it changed and refreshes the panel as it goes.
   const reply = [...messages].reverse().find((m) => m.role === "assistant");
   const work = (reply?.status === "pending" ? previews[reply.id]?.activity : reply?.activity) ?? [];
@@ -384,7 +411,23 @@ export function App() {
         onArchive={(id) => void archive(id)}
         onClose={() => setSidebarOpen(false)}
       />
-      <main className={`main ${empty ? "empty" : ""}`}>
+      <main
+        className={`main ${empty ? "empty" : ""} ${dropping ? "dropping" : ""}`}
+        onDragOver={(e) => {
+          if (!takesFiles || !e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          setDropping(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false);
+        }}
+        onDrop={(e) => {
+          setDropping(false);
+          if (!takesFiles || e.dataTransfer.files.length === 0) return;
+          e.preventDefault();
+          attach([...e.dataTransfer.files]);
+        }}
+      >
         <header className="topbar">
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open sidebar">
             <MenuIcon />
@@ -457,7 +500,10 @@ export function App() {
               running={running}
               focusKey={chatId ?? "new"}
               onChange={setDraft}
-              onSend={send}
+              onSend={(text) => void send(text, false, { files: attached })}
+              files={takesFiles ? attached : null}
+              onAttach={attach}
+              onRemove={(file) => setAttached((list) => list.filter((f) => f !== file))}
               onStop={stop}
               voice={voice}
               onVoiceMode={startVoiceMode}

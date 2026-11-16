@@ -1,8 +1,19 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// MAX_LISTED bounds one listing, so a folder of many files makes no huge response.
 pub const MAX_LISTED: usize = 500;
+
+/// MAX_UPLOAD caps one uploaded file at re:agent's own limit for an image it will open.
+pub const MAX_UPLOAD: usize = 20 * 1024 * 1024;
+
+/// Attachment is a file the user sent with a message, as saved in the chat's folder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub path: String,
+    pub size: u64,
+}
 
 /// File is one file in a chat's folder, as the files panel lists it.
 #[derive(Debug, Serialize)]
@@ -70,4 +81,74 @@ pub fn inside(folder: &Path, relative: &str) -> Option<PathBuf> {
     let folder = folder.canonicalize().ok()?;
     let path = folder.join(relative).canonicalize().ok()?;
     (path.starts_with(&folder) && path.is_file()).then_some(path)
+}
+
+/// Uploadable accepts a plain file name that the model's tools can see: not empty, without
+/// a slash or control characters, and not hidden, since re:agent skips `.env` and `.git`.
+pub fn uploadable(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control)
+}
+
+/// Save stores an upload at the folder's top level under its own name, or the first free
+/// `name-2.ext`, `name-3.ext` and so on: an upload never replaces a file.
+pub fn save(folder: &Path, name: &str, bytes: &[u8]) -> std::io::Result<Attachment> {
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+        _ => (name, String::new()),
+    };
+    for n in 1..=1000 {
+        let path = match n {
+            1 => name.to_owned(),
+            n => format!("{stem}-{n}{extension}"),
+        };
+        let target = folder.join(&path);
+        // Creating only a new file also refuses to follow a link someone left in its place.
+        let mut file = match std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = file.write_all(bytes) {
+            let _ = std::fs::remove_file(&target);
+            return Err(e);
+        }
+        return Ok(Attachment {
+            path,
+            size: bytes.len() as u64,
+        });
+    }
+    Err(std::io::Error::other(
+        "a thousand files already have this name",
+    ))
+}
+
+/// Kind names what a file is for the model: an image, text it can read, or something else.
+pub fn kind(path: &Path) -> &'static str {
+    const IMAGES: [&str; 10] = [
+        "png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "bmp", "tif", "tiff",
+    ];
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if IMAGES.contains(&extension.to_ascii_lowercase().as_str()) {
+        return "image";
+    }
+    let mut start = Vec::new();
+    let read = std::fs::File::open(path).and_then(|f| f.take(64 * 1024).read_to_end(&mut start));
+    // A character cut by the 64 KiB window still counts as text.
+    let text = match std::str::from_utf8(&start) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none(),
+    };
+    if read.is_ok() && text && !start.contains(&0) {
+        "text"
+    } else {
+        "other"
+    }
 }

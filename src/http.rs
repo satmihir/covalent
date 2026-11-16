@@ -44,7 +44,12 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
         .route("/api/chats/{id}/messages/{message}/speech", get(speak))
         .route("/api/images/{name}", get(image))
         .route("/api/chats/{id}/files", get(files))
-        .route("/api/chats/{id}/files/{*path}", get(file))
+        .route(
+            "/api/chats/{id}/files/{*path}",
+            get(file)
+                .put(upload)
+                .layer(DefaultBodyLimit::max(crate::files::MAX_UPLOAD)),
+        )
         .route("/api/models", get(models))
         .route("/api/chats", get(list).post(create))
         .route("/api/chats/{id}", get(chat))
@@ -98,6 +103,9 @@ struct SendBody {
     /// spoken marks a turn said aloud in voice mode, whose reply will be read aloud.
     #[serde(default)]
     spoken: bool,
+    /// attachments names files already uploaded to the chat's folder.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 
 impl IntoResponse for Failure {
@@ -181,7 +189,13 @@ async fn send(
     Json(body): Json<SendBody>,
 ) -> impl IntoResponse {
     blocking(move || {
-        let messages = chats.send(&id, &body.request_id, &body.text, body.spoken)?;
+        let messages = chats.send(
+            &id,
+            &body.request_id,
+            &body.text,
+            body.spoken,
+            &body.attachments,
+        )?;
         Ok(json!({"messages": messages}))
     })
     .await
@@ -281,6 +295,16 @@ async fn image(
 /// Events streams every chat's changes; a client that falls behind reloads what it shows.
 async fn files(State(chats): State<Arc<Chats>>, Path(id): Path<String>) -> impl IntoResponse {
     blocking(move || chats.files(&id)).await
+}
+
+/// Upload saves the request body as a new file in a chat's folder, under the name in the path
+/// or a numbered one beside it, and answers with the path it used.
+async fn upload(
+    State(chats): State<Arc<Chats>>,
+    Path((id, name)): Path<(String, String)>,
+    body: Bytes,
+) -> impl IntoResponse {
+    blocking(move || chats.upload(&id, &name, &body)).await
 }
 
 /// File serves one file from a chat's folder. The model wrote these files, so only pictures
@@ -632,6 +656,10 @@ mod tests {
                             "Here is your boat."
                         };
                         send(done(text, false));
+                        return;
+                    }
+                    if input.contains("attached these files") {
+                        send(done("Got your files.", false));
                         return;
                     }
                     if input.contains("packing list") {
@@ -1016,6 +1044,7 @@ mod tests {
                 sources: vec![],
                 images: vec![],
                 activity: vec![],
+                attachments: vec![],
             };
             store.insert_message(&message).unwrap();
         }
@@ -1546,6 +1575,7 @@ mod tests {
             sources: vec![],
             images: vec![],
             activity: vec![],
+            attachments: vec![],
         };
         store.insert_message(&reply).unwrap();
         reply.status = "complete".into();
@@ -1620,6 +1650,98 @@ mod tests {
 
         let (status, _) = call(&app, "GET", "/api/chats/missing/files", Value::Null).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Put uploads bytes as a file and returns the response's status and JSON body.
+    async fn put(app: &Router, uri: &str, bytes: Vec<u8>) -> (StatusCode, Value) {
+        let request = Request::put(uri).body(Body::from(bytes)).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn uploads_land_in_the_folder_without_replacing_and_the_message_names_them() {
+        let release = tempfile::tempdir().unwrap();
+        let release_file = release.path().join("release");
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release_file.clone()),
+            ),
+            ("COVALENT_TEST_RELEASE", release_file.display().to_string()),
+        ];
+        if !isolated(
+            "http::tests::uploads_land_in_the_folder_without_replacing_and_the_message_names_them",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, id) = fake_chat(dir.path()).await;
+        let files = format!("/api/chats/{id}/files");
+        let (status, saved) = put(&app, &format!("{files}/notes.md"), b"hello".to_vec()).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved, json!({"path": "notes.md", "size": 5}));
+        let (_, again) = put(&app, &format!("{files}/notes.md"), b"other".to_vec()).await;
+        assert_eq!(again["path"], "notes-2.md");
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(PIXEL)
+            .unwrap();
+        let (_, photo) = put(&app, &format!("{files}/photo.png"), png).await;
+        assert_eq!(photo["path"], "photo.png");
+
+        // Hidden names, paths and oversized bodies are refused, and nothing is replaced.
+        for name in [".env", "a%2Fb.txt", "%2E%2E"] {
+            let (status, _) = put(&app, &format!("{files}/{name}"), b"x".to_vec()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+        }
+        let big = vec![0; crate::files::MAX_UPLOAD + 1];
+        let (status, _) = put(&app, &format!("{files}/big.bin"), big).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        let folder = dir.path().join("workspaces").join(
+            call(&app, "GET", &format!("/api/chats/{id}"), Value::Null)
+                .await
+                .1["chat"]["workspace"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(std::fs::read(folder.join("notes.md")).unwrap(), b"hello");
+        assert!(!folder.join("big.bin").exists());
+
+        // A message of files alone reaches the model with a note naming each one.
+        let send =
+            json!({"request_id": "r1", "text": "", "attachments": ["notes.md", "photo.png"]});
+        let (status, sent) = call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        let body = settled(&app, &id).await;
+        assert_eq!(
+            body["messages"][0]["attachments"],
+            json!([{"path": "notes.md", "size": 5}, {"path": "photo.png", "size": photo["size"]}])
+        );
+        assert_eq!(body["messages"][1]["text"], "Got your files.");
+        let release = PathBuf::from(std::env::var("COVALENT_TEST_RELEASE").unwrap());
+        let seen = std::fs::read_to_string(release.with_file_name("requests.log")).unwrap();
+        assert!(seen.contains("notes.md (text, 5 B)"), "{seen}");
+        assert!(seen.contains("photo.png (image, "), "{seen}");
+
+        // Files outside the folder, or too many, are not attached.
+        let many: Vec<_> = (0..11).map(|_| "notes.md").collect();
+        for attachments in [
+            json!(["../covalent.db"]),
+            json!(["missing.md"]),
+            json!(many),
+        ] {
+            let send = json!({"request_id": "r2", "text": "x", "attachments": attachments});
+            let (status, _) = call(&app, "POST", &format!("/api/chats/{id}/messages"), send).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{attachments}");
+        }
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use crate::activity::Action;
+use crate::files::Attachment;
 use reagent::session_api::Source;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,8 @@ pub struct Message {
     pub images: Vec<Image>,
     /// activity lists the tool calls a reply made, in the order it made them.
     pub activity: Vec<Action>,
+    /// attachments lists the files the user sent with a message.
+    pub attachments: Vec<Attachment>,
 }
 
 /// Store keeps chats and their displayed messages in one SQLite file.
@@ -82,6 +85,7 @@ impl Store {
             ("messages", "images", "TEXT"),
             ("chats", "workspace", "TEXT"),
             ("messages", "activity", "TEXT"),
+            ("messages", "attachments", "TEXT"),
         ] {
             let columns: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
@@ -209,8 +213,9 @@ impl Store {
     /// Insert_message appends a message and marks its chat as active.
     pub fn insert_message(&self, m: &Message) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO messages (id, chat_id, role, text, status, reason, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (id, chat_id, role, text, status, reason, created_at_ms,
+                attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 m.id,
                 m.chat_id,
@@ -218,7 +223,8 @@ impl Store {
                 m.text,
                 m.status,
                 m.reason,
-                m.created_at_ms
+                m.created_at_ms,
+                list(&m.attachments)
             ],
         )?;
         self.conn.execute(
@@ -231,9 +237,6 @@ impl Store {
     /// Finish_message records a finished reply, whose ID names the message to update, and
     /// returns the updated message.
     pub fn finish_message(&self, reply: &Message) -> rusqlite::Result<Message> {
-        fn list<T: Serialize>(items: &[T]) -> Option<String> {
-            (!items.is_empty()).then(|| serde_json::to_string(items).unwrap())
-        }
         let id = &reply.id;
         self.conn.execute(
             "UPDATE messages SET text = ?2, status = ?3, reason = ?4, sources = ?5, images = ?6,
@@ -275,14 +278,20 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
         status: row.get("status")?,
         reason: row.get("reason")?,
         created_at_ms: row.get("created_at_ms")?,
-        sources: list(row, "sources")?,
-        images: list(row, "images")?,
-        activity: list(row, "activity")?,
+        sources: column(row, "sources")?,
+        images: column(row, "images")?,
+        activity: column(row, "activity")?,
+        attachments: column(row, "attachments")?,
     })
 }
 
-/// List reads a JSON list column, empty when unset or unreadable.
-fn list<T: serde::de::DeserializeOwned>(row: &Row, column: &str) -> rusqlite::Result<Vec<T>> {
+/// List writes a JSON list column, unset when empty.
+fn list<T: Serialize>(items: &[T]) -> Option<String> {
+    (!items.is_empty()).then(|| serde_json::to_string(items).unwrap())
+}
+
+/// Column reads a JSON list column, empty when unset or unreadable.
+fn column<T: serde::de::DeserializeOwned>(row: &Row, column: &str) -> rusqlite::Result<Vec<T>> {
     Ok(row
         .get::<_, Option<String>>(column)?
         .and_then(|json| serde_json::from_str(&json).ok())
@@ -305,6 +314,7 @@ mod tests {
             sources: vec![],
             images: vec![],
             activity: vec![],
+            attachments: vec![],
         }
     }
 

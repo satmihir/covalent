@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, describe, type File, type Listing } from "./api";
+import { api, describe, type FolderFile, type Listing } from "./api";
 import { decode, kind, size } from "./fileView";
 import { BackIcon, CloseIcon, DownloadIcon } from "./icons";
 
@@ -87,7 +87,7 @@ export function Files({ chatId, refresh, marked, selected, onSelect, onClose }: 
 
 /** Viewer shows a picture as itself, a small text file as plain text, and anything else as a
  *  name and size to download. It reloads when the file changes. */
-function Viewer({ chatId, file }: { chatId: string; file: File }) {
+function Viewer({ chatId, file }: { chatId: string; file: FolderFile }) {
   const url = `${api.fileUrl(chatId, file.path)}?v=${file.modified_at_ms}`;
   const shown = kind(file.path, file.size);
   const [text, setText] = useState<string | null | undefined>(undefined);

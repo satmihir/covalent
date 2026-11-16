@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, describe } from "./api";
+import { named } from "./attachments";
 import { record, type Recording } from "./audio";
-import { ArrowUpIcon, MicIcon, StopIcon, VoiceIcon } from "./icons";
+import { kind, size } from "./fileView";
+import { ArrowUpIcon, CloseIcon, MicIcon, PaperclipIcon, StopIcon, VoiceIcon } from "./icons";
 
 type Props = {
   value: string;
@@ -9,6 +11,10 @@ type Props = {
   focusKey: string;
   onChange: (value: string) => void;
   onSend: (text: string) => void;
+  /** files are the attachments waiting to be sent, or null where the chat cannot take files. */
+  files: File[] | null;
+  onAttach: (files: File[]) => void;
+  onRemove: (file: File) => void;
   onStop: () => void;
   /** voice shows the dictation button, and the voice mode button while the draft is empty. */
   voice: boolean;
@@ -26,9 +32,44 @@ function microphoneError(error: unknown): string {
   return describe(error);
 }
 
-export function Composer({ value, running, focusKey, onChange, onSend, onStop, voice, onVoiceMode, onError }: Props) {
+/** Chip shows one waiting attachment: a thumbnail for a picture, otherwise its name and size. */
+function Chip({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
+  useEffect(() => {
+    if (kind(file.name, file.size) !== "picture") return;
+    const url = URL.createObjectURL(file);
+    setThumbnail(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  return (
+    <div className="chip" title={file.name}>
+      {thumbnail ? <img src={thumbnail} alt="" /> : <span className="chip-name">{file.name}</span>}
+      {!thumbnail && <span className="chip-size">{size(file.size)}</span>}
+      <button type="button" onClick={onRemove} aria-label={`Remove ${file.name}`} title="Remove">
+        <CloseIcon />
+      </button>
+    </div>
+  );
+}
+
+export function Composer({
+  value,
+  running,
+  focusKey,
+  onChange,
+  onSend,
+  files,
+  onAttach,
+  onRemove,
+  voice,
+  onVoiceMode,
+  onError,
+  onStop,
+}: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
-  const empty = value.trim() === "";
+  const picker = useRef<HTMLInputElement>(null);
+  const attached = files?.length ?? 0;
+  const empty = value.trim() === "" && attached === 0;
   const [dictation, setDictation] = useState<Dictation>("idle");
   const recording = useRef<Recording | null>(null);
   // The transcript arrives after typing may have changed the draft, so it joins the latest one.
@@ -95,12 +136,36 @@ export function Composer({ value, running, focusKey, onChange, onSend, onStop, v
 
   return (
     <form
-      className="composer"
+      className={`composer ${attached ? "with-files" : ""}`}
       onSubmit={(e) => {
         e.preventDefault();
         submit();
       }}
     >
+      {files && attached > 0 && (
+        <div className="chips">
+          {files.map((file) => (
+            <Chip key={`${file.name}:${file.size}:${file.lastModified}`} file={file} onRemove={() => onRemove(file)} />
+          ))}
+        </div>
+      )}
+      {files && (
+        <>
+          <button type="button" className="attach-button" onClick={() => picker.current?.click()} aria-label="Attach files" title="Attach files">
+            <PaperclipIcon />
+          </button>
+          <input
+            ref={picker}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              onAttach([...(e.target.files ?? [])]);
+              e.target.value = "";
+            }}
+          />
+        </>
+      )}
       <textarea
         ref={input}
         rows={1}
@@ -108,6 +173,13 @@ export function Composer({ value, running, focusKey, onChange, onSend, onStop, v
         placeholder="Message Covalent"
         aria-label="Message"
         onChange={(e) => onChange(e.target.value)}
+        onPaste={(e) => {
+          // Pasted files attach; pasted text goes into the message as usual.
+          const pasted = [...e.clipboardData.files];
+          if (!files || pasted.length === 0) return;
+          e.preventDefault();
+          onAttach(pasted.map((file) => named(file, new Date())));
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();

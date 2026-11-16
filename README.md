@@ -97,6 +97,15 @@ button, and a row in a reply's activity opens its file in the panel. Files are
 never shown as web pages: HTML appears as text, and a file fetched directly is
 a download, so a file the model wrote can never run as part of Covalent.
 
+To bring your own files, click the paperclip, drop files onto the chat, or
+paste (a screenshot, or files copied in Finder). They upload when you send, up
+to 10 per message and 20 MB each, into the chat's folder under their own names;
+a name already taken gets a number (`photo-2.jpg`), so an upload never replaces
+a file. The model is told which files came with the message and opens them
+with its tools: it reads and edits text files, looks at pictures, and edits a
+picture by making a new one from it, keeping the original. It cannot read PDF
+or Office files; those can still be stored and downloaded.
+
 A chat cannot run programs or commands, and its file tools stay inside its own
 folder. One reply can make at most 40 tool calls in 30 model requests. Web
 search stays on, so a chat that has read a file could put its text into a

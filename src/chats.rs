@@ -1,4 +1,5 @@
 use crate::activity::Action;
+use crate::files::Attachment;
 use crate::store::{Chat, Image, Message, Store};
 use reagent::session_api::{
     self, ApiError, CommandState, EntryCursor, EventCursor, EventKind, HistoryMode, PlanMode,
@@ -22,8 +23,10 @@ const TITLE_PROMPT: &str = "You write titles for chats. Given the first message 
 const IMAGES: &str = "\n\nYou can create images with the generate_image tool. Use it only when \
     the user asks for a picture, drawing or illustration, and write the tool's prompt as a full \
     description of the image. Save each image as a new .png file with a short descriptive name. \
-    The image is shown to the user right above your reply, so answer with one short sentence: \
-    do not describe the image at length, link to it, or repeat the prompt.";
+    To change an image, generate a new one with the original as a reference image, under a new \
+    name, and say which file is the result. The image is shown to the user right above your \
+    reply, so answer with one short sentence: do not describe the image at length, link to it, \
+    or repeat the prompt.";
 
 /// MAX_TOOL_CALLS and MAX_STEPS bound one reply's work, and so what a runaway reply can cost.
 const MAX_TOOL_CALLS: u64 = 40;
@@ -34,6 +37,9 @@ const SPOKEN: &str = "The user said this message aloud in voice mode, so it may 
     transcription errors; answer what they most likely meant. Your reply will be read aloud: \
     answer in short, natural spoken sentences, without Markdown, lists, tables, code or URLs, \
     and keep it brief unless they ask for detail.";
+
+/// MAX_ATTACHMENTS bounds the files one message can bring, and so the note that lists them.
+const MAX_ATTACHMENTS: usize = 10;
 
 /// Launch holds the settings every chat Session opens with.
 #[derive(Clone, Debug)]
@@ -383,29 +389,32 @@ impl Chats {
 
     /// Send admits a user message and returns the chat's messages, ending with the pending reply.
     /// A spoken message carries a note asking for a reply suited to being heard.
+    /// Attachments name files already uploaded to the chat's folder; the note lists them.
     pub fn send(
         self: &Arc<Self>,
         chat_id: &str,
         request_id: &str,
         text: &str,
         spoken: bool,
+        attachments: &[String],
     ) -> Result<Vec<Message>, Failure> {
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && attachments.is_empty() {
             return Err(Failure::new(400, "invalid_argument", "message is empty"));
         }
         let (chat, messages) = self.get(chat_id)?;
         if chat.archived_at_ms.is_some() {
             return Err(archived());
         }
+        let attached = self.attached(&chat, attachments)?;
         // A retry after a restart must not reach re:agent, whose deduplication is per opening.
         if self.store.lock().unwrap().has_message(request_id)? {
             return Ok(messages);
         }
         let first = messages.is_empty();
         let api = self.session(chat_id)?;
-        let note = spoken.then_some(SPOKEN);
+        let note = note(spoken, &attached);
         let start = start(&api.get_snapshot()?);
-        let submit = |api: &SessionApi| match note {
+        let submit = |api: &SessionApi| match &note {
             Some(note) => {
                 api.send_message_with_note(request_id, text.as_bytes(), note, PlanMode::Keep)
             }
@@ -434,12 +443,14 @@ impl Chats {
             sources: vec![],
             images: vec![],
             activity: vec![],
+            attachments: attached.into_iter().map(|(a, _)| a).collect(),
         };
         let reply = Message {
             id: run.run_id.clone(),
             role: "assistant".into(),
             text: String::new(),
             status: "pending".into(),
+            attachments: vec![],
             ..user.clone()
         };
         {
@@ -458,10 +469,80 @@ impl Chats {
         std::thread::spawn(move || chats.await_reply(&reply_chat, &api, &run, start));
         if first {
             let chats = self.clone();
-            let (chat_id, text) = (chat_id.to_owned(), text.to_owned());
+            // A message of files alone is titled from their names.
+            let text = if text.trim().is_empty() {
+                attachments.join(", ")
+            } else {
+                text.to_owned()
+            };
+            let chat_id = chat_id.to_owned();
             std::thread::spawn(move || chats.write_title(&chat_id, &text));
         }
         Ok(self.get(chat_id)?.1)
+    }
+
+    /// Attached checks that each named file is in the chat's folder, with its size and kind.
+    fn attached(
+        &self,
+        chat: &Chat,
+        paths: &[String],
+    ) -> Result<Vec<(Attachment, &'static str)>, Failure> {
+        if paths.is_empty() {
+            return Ok(vec![]);
+        }
+        let refuse = |message: String| Failure::new(400, "invalid_argument", message);
+        if paths.len() > MAX_ATTACHMENTS {
+            return Err(refuse(format!(
+                "At most {MAX_ATTACHMENTS} files can be attached to one message."
+            )));
+        }
+        let folder = self
+            .launch
+            .workspace(chat)
+            .ok_or_else(|| refuse("This chat has no folder for files.".into()))?;
+        paths
+            .iter()
+            .map(|path| {
+                let file = crate::files::inside(&folder, path).ok_or_else(|| {
+                    refuse(format!("{path} is not a file in this chat's folder."))
+                })?;
+                let size = file.metadata().map_or(0, |m| m.len());
+                let attachment = Attachment {
+                    path: path.clone(),
+                    size,
+                };
+                Ok((attachment, crate::files::kind(&file)))
+            })
+            .collect()
+    }
+
+    /// Upload saves a file the user is about to send into the chat's folder.
+    pub fn upload(&self, chat_id: &str, name: &str, bytes: &[u8]) -> Result<Attachment, Failure> {
+        let chat = self
+            .store
+            .lock()
+            .unwrap()
+            .chat(chat_id)?
+            .ok_or_else(|| Failure::new(404, "not_found", "no such chat"))?;
+        if chat.archived_at_ms.is_some() {
+            return Err(archived());
+        }
+        let folder = self.launch.workspace(&chat).ok_or_else(|| {
+            Failure::new(
+                400,
+                "invalid_argument",
+                "This chat has no folder for files.",
+            )
+        })?;
+        if !crate::files::uploadable(name) {
+            return Err(Failure::new(
+                400,
+                "invalid_argument",
+                format!("{name} can't be uploaded: a file name can't be empty, start with a dot, or contain a slash."),
+            ));
+        }
+        crate::files::save(&folder, name, bytes)
+            .map_err(|e| Failure::new(500, "workspace", format!("save {name}: {e}")))
     }
 
     /// Cancel asks every unfinished conversation Run in a chat to stop.
@@ -707,6 +788,39 @@ impl Chats {
             chat_id: chat_id.into(),
             title,
         });
+    }
+}
+
+/// Note is what the model is told beside a message: that it was spoken, and which files the
+/// user attached.
+fn note(spoken: bool, attached: &[(Attachment, &str)]) -> Option<String> {
+    let mut parts = Vec::new();
+    if spoken {
+        parts.push(SPOKEN.to_owned());
+    }
+    if !attached.is_empty() {
+        let mut files = String::from(
+            "The user attached these files to this message; they are in the chat's folder \
+             under these names:",
+        );
+        for (attachment, kind) in attached {
+            files.push_str(&format!(
+                "\n- {} ({kind}, {})",
+                attachment.path,
+                size(attachment.size)
+            ));
+        }
+        parts.push(files);
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// Size writes a byte count the way a file list does.
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
     }
 }
 
