@@ -112,6 +112,27 @@ Covalent has no login. Every device on your tailnet can then read and use
 every chat and its files. Never publish it with `tailscale funnel`, which puts
 it on the public internet.
 
+### The iPhone app (a proof, for now)
+
+`ios/` holds a small native app that does voice mode only, and keeps talking
+with the phone locked or another app in front, which Safari cannot. It is the
+first step of [the iPhone design](docs/covalent-ios-design.md).
+
+1. Open `ios/Covalent.xcodeproj` in Xcode.
+2. Under the Covalent target's Signing & Capabilities, choose your team. If
+   Xcode says the bundle identifier is taken, change `local.covalent.app` to
+   something of your own.
+3. Connect the iPhone, choose it as the destination, and run.
+4. Enter Covalent's Tailscale address, leave the chat empty for a new one, and
+   tap Start talking.
+
+With a free Apple ID the app stops opening after 7 days; run it from Xcode
+again. The parts that need no phone are a Swift package with tests:
+
+```bash
+cd ios/CovalentVoice && swift test
+```
+
 ## Files
 
 Each new chat has a folder of its own, `workspaces/<name>/` in Covalent's data

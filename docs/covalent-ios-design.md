@@ -18,7 +18,35 @@ As built:
   port share it.
 
 Not checked: anything on an iPhone, Tailscale Serve's `Host` header, and the
-wake lock on a real phone. This is a design, not a plan with settled steps: nothing here is
+wake lock on a real phone.
+
+**Status, 2026-11-15:** step 14's proof is built and compiles for iPhone and
+the simulator; it has not run anywhere yet. As built:
+
+- `ios/CovalentVoice` (a Swift package, `swift test` on the Mac): `Server`
+  for the routes, `Pcm16` for WAV out and speech in, and `SpeechDetector`,
+  with six tests.
+- `ios/Covalent`: `CovalentApp.swift` (one screen: address, chat, Start, a
+  status line and a level meter) and `VoiceSession.swift` (the audio session,
+  the engine with voice processing, and a simple listen, send, speak cycle;
+  talking over a reply stops and cancels it; a call or Siri pauses it).
+- The Xcode project is hand-written in Xcode's folder-synchronized format, so
+  files added under `ios/Covalent/` need no project edit. Bundle identifier
+  `local.covalent.app`, iOS 17 and up, Swift 5 language mode.
+- Not ported yet: the page's retry when a reply restarts, and its loop tests.
+  Both come with step 15.
+
+The check on the phone, with Covalent reachable over Tailscale:
+
+1. Start talking, ask a question, and hear the answer from the speaker.
+2. Lock the phone mid-answer; it keeps speaking. Ask another question while
+   locked; it answers.
+3. Open another app that does not play sound (Notes); ask a question; it
+   answers.
+4. Talk over a long answer; it stops, and the chat on the Mac shows the reply
+   stopped.
+5. Note the iOS version, whether echo made it interrupt itself, and roughly how
+   long from the end of a question to the first word. This is a design, not a plan with settled steps: nothing here is
 built, and the parts marked "to verify" have not been tried on a device. When
 code exists and disagrees with this page, the code is right.
 

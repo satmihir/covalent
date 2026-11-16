@@ -3,3 +3,6 @@
 /web/dist
 /.cargo/config.toml
 /.env
+/ios/CovalentVoice/.build
+/ios/CovalentVoice/.swiftpm
+xcuserdata/
