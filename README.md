@@ -37,6 +37,7 @@ cd web && npm run dev
 | `COVALENT_WEB_DIR` | `web/dist` | The built frontend. |
 | `COVALENT_MODEL`, `COVALENT_EFFORT` | re:agent's defaults | Model and reasoning effort for chats. |
 | `COVALENT_TITLE_MODEL`, `COVALENT_TITLE_EFFORT` | re:agent's defaults | Model and effort for writing titles. |
+| `COVALENT_HOSTS` | none | Extra host names to answer to, separated by commas, such as a Tailscale name. |
 
 re:agent's own settings, such as `REAGENT_OPENAI_BASE_URL`, apply as usual.
 Sessions are saved in re:agent's session store with the origin label
@@ -70,6 +71,11 @@ progress finish as text. Pauses are found in the browser by a speech detector
 serves itself under `/vad/`; voice mode loads them the first time it opens.
 Use headphones if the reply's sound makes it stop itself.
 
+While voice mode is open it keeps the screen on, where the browser allows it,
+so a phone does not lock mid-conversation. If the microphone is taken away (the
+phone locks anyway, another app comes to the front, or a call comes in), voice
+mode pauses and says so; tap the circle to start it again.
+
 Voice sends recordings, and the text of each reply read aloud, to OpenAI, also
 in chats whose model is Claude. It is billed to the API key, apart from any
 ChatGPT plan: roughly half a cent per minute dictated and three cents per minute
@@ -79,6 +85,32 @@ The key is also one re:agent can use for chat. While your ChatGPT login is
 valid, chats still use the plan, but if the login lapses re:agent falls back to
 the key without saying so. To make that an error instead, start Covalent with
 `REAGENT_OPENAI_AUTH=chatgpt`.
+
+## Using it from a phone
+
+Covalent listens only on this machine's loopback address, and a phone's
+browser allows the microphone only on HTTPS. Tailscale gives both without
+opening Covalent to anyone else:
+
+1. Install Tailscale on the Mac and the phone, signed in to the same account.
+2. On the Mac, publish Covalent to your own devices:
+
+   ```bash
+   tailscale serve --bg 7420
+   ```
+
+   It prints an address like `https://mac.tail1234.ts.net`.
+3. Start Covalent with that name allowed:
+
+   ```bash
+   COVALENT_HOSTS=mac.tail1234.ts.net cargo run --release
+   ```
+
+4. Open the address in Safari on the phone.
+
+Covalent has no login. Every device on your tailnet can then read and use
+every chat and its files. Never publish it with `tailscale funnel`, which puts
+it on the public internet.
 
 ## Files
 

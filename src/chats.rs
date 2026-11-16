@@ -132,6 +132,12 @@ pub enum Event {
         /// generating is true from when this reply starts making an image until it finishes.
         generating: bool,
     },
+    /// Admitted carries a new user message and its pending reply, so every open page shows a
+    /// message sent from elsewhere, such as another tab or the phone app's voice mode.
+    Admitted {
+        chat_id: String,
+        messages: Vec<Message>,
+    },
     /// Activity carries all of a pending reply's tool calls so far, each time one changes.
     Activity {
         chat_id: String,
@@ -463,6 +469,11 @@ impl Chats {
             .lock()
             .unwrap()
             .insert(run.run_id.clone(), (chat_id.into(), Preview::default()));
+        // Announced before the reply's work starts, so it comes before any event about the reply.
+        let _ = self.events.send(Event::Admitted {
+            chat_id: chat_id.into(),
+            messages: vec![user, reply],
+        });
         let chats = self.clone();
         let api = self.session(chat_id)?;
         let reply_chat = chat_id.to_owned();

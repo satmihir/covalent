@@ -95,6 +95,13 @@ export class VoiceLoop {
     this.reply = null;
   }
 
+  /** Pause stops the speech and ignores late results, as close does, but the loop stays open:
+   *  the next utterance starts a turn as usual. A reply still being written finishes as text. */
+  pause(): void {
+    this.close();
+    this.set("listening");
+  }
+
   private play(turn: number, reply: Reply, retries: number): void {
     const speech = this.deps.speak(reply, () => {
       if (turn === this.turn) this.set("speaking");

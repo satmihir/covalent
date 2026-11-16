@@ -159,6 +159,23 @@ test("ending voice mode stops the speech and lets the reply finish as text", asy
   assert.equal(f.speeches.length, 1);
 });
 
+test("pausing stops the speech, lets the reply finish as text, and the next turn works", async () => {
+  const f = fake();
+  await ask(f, "hi", "r1");
+  f.speeches[0].onAudio();
+  f.loop.pause();
+  assert.equal(f.speeches[0].stopped, true);
+  assert.deepEqual(f.cancelled, []);
+  assert.equal(f.loop.status, "listening");
+  // The paused reply's speech ending late starts nothing.
+  f.speeches[0].done.resolve();
+  await settle();
+  assert.equal(f.speeches.length, 1);
+  await ask(f, "again", "r2");
+  assert.equal(f.speeches.length, 2);
+  assert.equal(f.loop.status, "thinking");
+});
+
 test("a failure is reported and the loop listens again", async () => {
   const f = fake();
   void f.loop.heard(audio);

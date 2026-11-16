@@ -33,7 +33,13 @@ impl FromRef<App> for Arc<Chats> {
 }
 
 /// Router serves the JSON API under `/api` and the built frontend from `web` for every other path.
-pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) -> Router {
+/// It answers requests addressed to this machine's loopback names and to `hosts`.
+pub fn router(
+    chats: Arc<Chats>,
+    voice: Option<Voice>,
+    web: &std::path::Path,
+    hosts: &[String],
+) -> Router {
     let frontend = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     Router::new()
         .route("/api/voice", get(voice_available))
@@ -59,23 +65,29 @@ pub fn router(chats: Arc<Chats>, voice: Option<Voice>, web: &std::path::Path) ->
         .route("/api/chats/{id}/archive", post(archive))
         .route("/api/events", get(events))
         .fallback_service(frontend)
-        .layer(middleware::from_fn(local))
+        .layer(middleware::from_fn_with_state(
+            hosts
+                .iter()
+                .map(|h| h.to_ascii_lowercase())
+                .collect::<Arc<[String]>>(),
+            local,
+        ))
         .with_state(App { chats, voice })
 }
 
-/// Local refuses a request a browser addressed to, or sent from, any site but this machine,
-/// so a web page can neither point its own name at Covalent nor post to it from elsewhere.
-/// Browsers always send Host, and Origin on a cross-site post; a request without them did
-/// not come from a page.
-async fn local(request: Request, next: Next) -> Response {
-    if addressed_here(request.headers()) {
+/// Local refuses a request a browser addressed to, or sent from, any site but this machine
+/// and the extra names Covalent was given, so a web page can neither point its own name at
+/// Covalent nor post to it from elsewhere. Browsers always send Host, and Origin on a
+/// cross-site post; a request without them did not come from a page.
+async fn local(State(hosts): State<Arc<[String]>>, request: Request, next: Next) -> Response {
+    if addressed_here(request.headers(), &hosts) {
         return next.run(request).await;
     }
     let body = json!({"error": "forbidden", "message": "Covalent answers only this machine."});
     (StatusCode::FORBIDDEN, Json(body)).into_response()
 }
 
-fn addressed_here(headers: &HeaderMap) -> bool {
+fn addressed_here(headers: &HeaderMap, hosts: &[String]) -> bool {
     let header = |name| headers.get(name).map(|v| v.to_str().unwrap_or(""));
     let origin = header(header::ORIGIN).map(|origin| {
         let origin = origin.split_once("://").map_or("", |(_, rest)| rest);
@@ -84,16 +96,17 @@ fn addressed_here(headers: &HeaderMap) -> bool {
     [header(header::HOST), origin]
         .into_iter()
         .flatten()
-        .all(loopback)
+        .all(|host| known(host, hosts))
 }
 
-/// Loopback accepts this machine's own names, with or without a port.
-fn loopback(host: &str) -> bool {
+/// Known accepts this machine's own names and the extra ones given, with or without a port.
+fn known(host: &str, hosts: &[String]) -> bool {
     let name = match host.rsplit_once(':') {
         Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
         _ => host,
     };
-    matches!(name, "127.0.0.1" | "localhost" | "[::1]")
+    let name = name.to_ascii_lowercase();
+    matches!(name.as_str(), "127.0.0.1" | "localhost" | "[::1]") || hosts.contains(&name)
 }
 
 #[derive(Deserialize)]
@@ -433,7 +446,7 @@ mod tests {
             ..launch(dir)
         };
         let chats = Chats::new(Store::open(&dir.join("covalent.db")).unwrap(), launch);
-        (router(chats.clone(), None, &dir.join("web")), chats)
+        (router(chats.clone(), None, &dir.join("web"), &[]), chats)
     }
 
     async fn call(app: &Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -510,10 +523,20 @@ mod tests {
 
         let mut kinds = Vec::new();
         while let Ok(event) = events.try_recv() {
-            kinds.push(serde_json::to_value(event).unwrap()["type"].clone());
+            let event = serde_json::to_value(event).unwrap();
+            if event["type"] == "admitted" {
+                // Another page learns of the message, and of its reply while still pending.
+                let messages = &event["messages"];
+                assert_eq!(messages[0]["id"], "r1", "{event}");
+                assert_eq!(messages[0]["text"], "How do I bake bread?");
+                assert_eq!(messages[1]["status"], "pending", "{event}");
+                assert_eq!(messages[1]["id"], body["messages"][1]["id"]);
+            }
+            kinds.push(event["type"].clone());
         }
-        kinds.sort_by_key(|k| k.to_string());
-        assert_eq!(kinds, [json!("message"), json!("title")]);
+        // The message is admitted before its reply finishes; the title can come at any time.
+        kinds.retain(|k| k != "title");
+        assert_eq!(kinds, [json!("admitted"), json!("message")]);
         let (_, listed) = call(&app, "GET", "/api/chats", Value::Null).await;
         assert_eq!(listed["chats"][0]["id"], id.as_str());
     }
@@ -740,7 +763,7 @@ mod tests {
             Store::open(&dir.path().join("covalent.db")).unwrap(),
             launch,
         );
-        let app = router(chats.clone(), None, &dir.path().join("web"));
+        let app = router(chats.clone(), None, &dir.path().join("web"), &[]);
         let mut events = chats.subscribe();
         let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
@@ -862,7 +885,7 @@ mod tests {
             Store::open(&dir.path().join("covalent.db")).unwrap(),
             launch(dir.path()),
         );
-        let app = router(chats, None, &dir.path().join("web"));
+        let app = router(chats, None, &dir.path().join("web"), &[]);
         let (_, models) = call(&app, "GET", "/api/models", Value::Null).await;
         let ids: Vec<_> = models["models"]
             .as_array()
@@ -1048,7 +1071,7 @@ mod tests {
             };
             store.insert_message(&message).unwrap();
         }
-        router(Chats::new(store, launch(dir)), voice, &dir.join("web"))
+        router(Chats::new(store, launch(dir)), voice, &dir.join("web"), &[])
     }
 
     async fn upload(app: &Router, media_type: &str, audio: &[u8]) -> (StatusCode, String) {
@@ -1285,6 +1308,7 @@ mod tests {
             chats,
             Some(Voice::new("k".into(), base)),
             &dir.path().join("web"),
+            &[],
         );
         let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
@@ -1350,7 +1374,7 @@ mod tests {
             Store::open(&dir.path().join("covalent.db")).unwrap(),
             launch,
         );
-        let app = router(chats, None, &dir.path().join("web"));
+        let app = router(chats, None, &dir.path().join("web"), &[]);
         let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
         let uri = format!("/api/chats/{id}/messages");
@@ -1427,7 +1451,7 @@ mod tests {
             ..launch(dir)
         };
         let chats = Chats::new(Store::open(&dir.join("covalent.db")).unwrap(), launch);
-        let app = router(chats.clone(), None, &dir.join("web"));
+        let app = router(chats.clone(), None, &dir.join("web"), &[]);
         let (_, created) = call(&app, "POST", "/api/chats", Value::Null).await;
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
         (app, chats, id)
@@ -1589,6 +1613,7 @@ mod tests {
             Chats::new(store, launch(dir.path())),
             None,
             &dir.path().join("web"),
+            &[],
         );
         let (status, headers, bytes) = fetch(&app, "/api/images/image-ab12.png", &[]).await;
         assert_eq!(status, StatusCode::OK);
@@ -1768,9 +1793,24 @@ mod tests {
             ],
             &[("host", "127.0.0.1:7420"), ("origin", "null")],
             &[("host", "localhost.example")],
+            &[("host", "mac.tail1234.ts.net")],
         ] {
             let (status, _, _) = fetch(&app, "/api/chats", headers).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
         }
+
+        // A name Covalent was given is answered too, in Host and Origin, and only that name.
+        let (_, chats) = super::tests::app(dir.path(), &[]);
+        let given = ["Mac.Tail1234.ts.net".to_owned()];
+        let named = router(chats, None, &dir.path().join("web"), &given);
+        let tailnet = [
+            ("host", "mac.tail1234.ts.net"),
+            ("origin", "https://mac.tail1234.ts.net"),
+        ];
+        let (status, _, _) = fetch(&named, "/api/chats", &tailnet).await;
+        assert_eq!(status, StatusCode::OK);
+        let other = [("host", "other.tail1234.ts.net")];
+        let (status, _, _) = fetch(&named, "/api/chats", &other).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

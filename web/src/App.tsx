@@ -224,6 +224,13 @@ export function App() {
           const { [event.message.id]: _done, ...rest } = previewRef.current;
           showPreviews(rest);
         }
+      } else if (event.type === "admitted") {
+        // A message this page sent is already shown, and its own send response reconciles it.
+        const [user] = event.messages;
+        if (event.chat_id === current.current) {
+          setMessages((list) => (list.some((m) => m.id === `local:${user.id}`) ? list : event.messages.reduce(upsert, list)));
+        }
+        setChats((list) => bump(list, event.chat_id));
       } else if (event.type === "preview") {
         queued.current.push(event);
         if (!frame.current) frame.current = requestAnimationFrame(flushPreviews);

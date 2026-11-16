@@ -81,6 +81,7 @@ export type PreviewEvent = {
 
 export type ServerEvent =
   | { type: "message"; message: Message }
+  | { type: "admitted"; chat_id: string; messages: Message[] }
   | { type: "title"; chat_id: string; title: string }
   | PreviewEvent
   | { type: "activity"; chat_id: string; message_id: string; activity: Action[] }

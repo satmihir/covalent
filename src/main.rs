@@ -48,7 +48,16 @@ async fn serve() -> Result<(), String> {
     if voice.is_none() {
         println!("covalent: voice is off; set OPENAI_API_KEY to turn it on");
     }
-    let app = http::router(chats::Chats::new(store, launch), voice, &web);
+    // Extra names to answer to, such as the Tailscale name a phone reaches this Mac by.
+    let hosts: Vec<String> = env("COVALENT_HOSTS")
+        .map(|v| {
+            v.split([',', ' '])
+                .filter(|h| !h.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let app = http::router(chats::Chats::new(store, launch), voice, &web, &hosts);
     // No graceful shutdown: open event streams never finish, and re:agent has already saved
     // every accepted step, so Ctrl-C ending the process loses nothing a restart cannot report.
     axum::serve(listener, app)

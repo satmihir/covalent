@@ -19,7 +19,8 @@ type Props = {
   onClose: () => void;
 };
 
-function label(status: VoiceStatus | "starting", muted: boolean, searching: boolean): string {
+function label(status: VoiceStatus | "starting", muted: boolean, searching: boolean, paused: boolean): string {
+  if (paused) return "Paused · tap to resume";
   switch (status) {
     case "starting":
       return "Starting the microphone…";
@@ -39,9 +40,13 @@ function label(status: VoiceStatus | "starting", muted: boolean, searching: bool
 export function Voice({ send, pending, cancel, searching, onError, onClose }: Props) {
   const [status, setStatus] = useState<VoiceStatus | "starting">("starting");
   const [muted, setMuted] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [level, setLevel] = useState(0);
   const loop = useRef<VoiceLoop | null>(null);
   const detector = useRef<MicVAD | null>(null);
+  const resume = useRef<() => void>(() => {});
+  const mutedNow = useRef(false);
+  mutedNow.current = muted;
   // Callbacks change on every render of the app; the loop always calls the latest ones.
   const latest = useRef({ send, pending, cancel, onError, onClose });
   latest.current = { send, pending, cancel, onError, onClose };
@@ -60,10 +65,70 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
       onError: (error) => latest.current.onError(describe(error)),
     });
     loop.current = voice;
+
+    // A phone takes the microphone away when it locks or another app comes to the front.
+    // Voice mode then pauses, and a tap starts it again with a new microphone.
+    let paused_ = false;
+    let stream: MediaStream | null = null;
+
+    // The screen stays on while voice mode is open, so a phone does not lock mid-conversation.
+    // Browsers drop the lock whenever the page is hidden, so it is asked for again on return.
+    let lock: WakeLockSentinel | null = null;
+    const awake = () => {
+      if (closed || paused_ || document.visibilityState !== "visible" || !("wakeLock" in navigator)) return;
+      navigator.wakeLock.request("screen").then(
+        (sentinel) => {
+          if (closed) void sentinel.release();
+          else lock = sentinel;
+        },
+        () => {},
+      );
+    };
+
+    const pause = () => {
+      if (closed || paused_ || !detector.current) return;
+      paused_ = true;
+      voice.pause();
+      void detector.current.pause();
+      void lock?.release();
+      setPaused(true);
+    };
+    const microphone = async () => {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true },
+      });
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener("ended", pause);
+        track.addEventListener("mute", pause);
+      }
+      return stream;
+    };
+    const returned = () => {
+      if (document.visibilityState !== "visible" || paused_) return;
+      const lost = !mutedNow.current && stream?.getAudioTracks().some((t) => t.readyState === "ended" || t.muted);
+      if (lost) pause();
+      else awake();
+    };
+    // Safari interrupts audio for a call or another app's sound.
+    speakers.onstatechange = () => {
+      if ((speakers.state as string) === "interrupted") pause();
+    };
+    document.addEventListener("visibilitychange", returned);
+    resume.current = () => {
+      if (!paused_) return;
+      paused_ = false;
+      setPaused(false);
+      void speakers.resume().catch(() => {});
+      if (!mutedNow.current) void detector.current?.start();
+      awake();
+    };
+
     MicVAD.new({
       model: "v5",
       baseAssetPath: "/vad/",
       onnxWASMBasePath: "/vad/",
+      getStream: microphone,
+      resumeStream: microphone,
       // A pause this long ends a turn; shorter ones are a breath inside it.
       redemptionMs: 800,
       onSpeechRealStart: () => voice.speechStarted(),
@@ -74,6 +139,7 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
         if (closed) return void vad.destroy();
         detector.current = vad;
         setStatus("listening");
+        awake();
       },
       (error) => {
         if (closed) return;
@@ -88,6 +154,8 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
     );
     return () => {
       closed = true;
+      document.removeEventListener("visibilitychange", returned);
+      void lock?.release();
       voice.close();
       void detector.current?.destroy();
       detector.current = null;
@@ -104,25 +172,26 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
     setLevel(0);
   };
 
-  const busy = status === "thinking" || status === "speaking";
-  const scale = status === "listening" && !muted ? 1 + level * 0.18 : 1;
+  const busy = !paused && (status === "thinking" || status === "speaking");
+  const scale = status === "listening" && !muted && !paused ? 1 + level * 0.18 : 1;
+  const text = label(status, muted, searching, paused);
   return (
     <div className="voice" role="region" aria-label="Voice mode">
       <button
-        className={`voice-orb ${status} ${muted ? "muted" : ""}`}
+        className={`voice-orb ${status} ${muted || paused ? "muted" : ""}`}
         style={{ transform: `scale(${scale})` }}
-        onClick={() => busy && loop.current?.interrupt()}
-        aria-label={busy ? "Interrupt" : label(status, muted, searching)}
-        disabled={!busy}
+        onClick={() => (paused ? resume.current() : busy && loop.current?.interrupt())}
+        aria-label={paused ? "Resume voice mode" : busy ? "Interrupt" : text}
+        disabled={!busy && !paused}
       />
       <p className="voice-status" role="status">
-        {label(status, muted, searching)}
+        {text}
       </p>
       <div className="voice-controls">
         <button
           className={`voice-button ${muted ? "active" : ""}`}
           onClick={toggleMute}
-          disabled={status === "starting"}
+          disabled={status === "starting" || paused}
           aria-label={muted ? "Unmute" : "Mute"}
           title={muted ? "Unmute" : "Mute"}
         >
