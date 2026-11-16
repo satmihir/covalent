@@ -31,7 +31,7 @@ final class VoiceSession {
     /// turn changes whenever the user starts over, so work for an older turn stops.
     private var turn = 0
     private var work: Task<Void, Never>?
-    private var interruptions: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
 
     // Formats never change; the audio thread reads them too.
     nonisolated private static let heard = AVAudioFormat(
@@ -75,8 +75,8 @@ final class VoiceSession {
         player.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        if let interruptions { NotificationCenter.default.removeObserver(interruptions) }
-        interruptions = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         detector = SpeechDetector(rate: 16000)
         level = -100
@@ -96,12 +96,36 @@ final class VoiceSession {
         try session.setCategory(
             .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
         try session.setActive(true)
-        let input = engine.inputNode
-        try input.setVoiceProcessingEnabled(true)
+        try engine.inputNode.setVoiceProcessingEnabled(true)
         if player.engine == nil { engine.attach(player) }
         engine.connect(player, to: engine.mainMixerNode, format: Self.said)
+        try run()
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(
+                forName: AVAudioSession.interruptionNotification, object: session, queue: .main
+            ) { [weak self] note in
+                let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    == AVAudioSession.InterruptionType.began.rawValue
+                Task { @MainActor in self?.interrupted(began: began) }
+            },
+            // The engine stops itself when the audio route or format changes, such as when
+            // AirPods connect, and stays stopped until started again.
+            center.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.reconfigured() }
+            },
+        ]
+    }
+
+    /// Run taps the microphone in its current format and starts the engine and player.
+    private func run() throws {
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
         let format = input.outputFormat(forBus: 0)
-        guard let converter = AVAudioConverter(from: format, to: Self.heard) else {
+        guard format.sampleRate > 0, let converter = AVAudioConverter(from: format, to: Self.heard)
+        else {
             throw Server.Failure(message: "The microphone's format can't be converted.")
         }
         converter.downmix = true
@@ -112,12 +136,16 @@ final class VoiceSession {
         engine.prepare()
         try engine.start()
         player.play()
-        interruptions = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification, object: session, queue: .main
-        ) { [weak self] note in
-            let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
-                == AVAudioSession.InterruptionType.began.rawValue
-            Task { @MainActor in self?.interrupted(began: began) }
+    }
+
+    /// Reconfigured restarts the engine after the system stopped it for a route change.
+    private func reconfigured() {
+        guard status != .off, status != .paused else { return }
+        do {
+            try run()
+        } catch {
+            self.error = "Voice mode stopped: \(error.localizedDescription)"
+            stop()
         }
     }
 
@@ -232,8 +260,7 @@ final class VoiceSession {
         }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
-            if !engine.isRunning { try engine.start() }
-            player.play()
+            try run()
             status = .listening
         } catch {
             self.error = "Voice mode could not resume: \(error.localizedDescription)"
