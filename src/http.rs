@@ -1,6 +1,7 @@
 use crate::chats::{Chats, Failure, Reply};
 use crate::speech::{self, Voice};
 use axum::body::{Body, Bytes};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{DefaultBodyLimit, FromRef, Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
@@ -47,6 +48,7 @@ pub fn router(
             "/api/transcribe",
             post(transcribe).layer(DefaultBodyLimit::max(RECORDING)),
         )
+        .route("/api/listen", get(listen))
         .route("/api/chats/{id}/messages/{message}/speech", get(speak))
         .route("/api/images/{name}", get(image))
         .route("/api/chats/{id}/files", get(files))
@@ -249,6 +251,13 @@ async fn transcribe(
         .unwrap_or("");
     let text = voice.transcribe(audio.to_vec(), media_type).await?;
     Ok(Json(json!({ "text": text })))
+}
+
+/// Listen opens a WebSocket that carries voice mode's speech to OpenAI as it is spoken and
+/// each turn's words back; OpenAI is reached first, so a failure is an ordinary error.
+async fn listen(State(app): State<App>, upgrade: WebSocketUpgrade) -> Result<Response, Failure> {
+    let listener = voice(&app)?.listen().await?;
+    Ok(upgrade.on_upgrade(move |browser| speech::relay(browser, listener)))
 }
 
 /// Speak streams a reply read aloud as raw PCM; closing the request stops the reading.
@@ -1010,6 +1019,8 @@ mod tests {
             say(json!({"type": "response.output_audio.delta", "delta": audio}))
         };
         let _ = socket.send(say(json!({"type": "session.created"}))).await;
+        // A transcription session answers each commit with the number of samples it holds.
+        let (mut samples, mut items) = (0, 0);
         while let Some(Ok(Ws::Text(frame))) = socket.recv().await {
             let event: Value = serde_json::from_str(&frame).unwrap();
             seen.lock()
@@ -1018,6 +1029,26 @@ mod tests {
             match event["type"].as_str().unwrap() {
                 "session.update" => {
                     let _ = socket.send(say(json!({"type": "session.updated"}))).await;
+                }
+                "input_audio_buffer.append" => {
+                    let audio = event["audio"].as_str().unwrap();
+                    samples += base64::engine::general_purpose::STANDARD
+                        .decode(audio)
+                        .unwrap()
+                        .len()
+                        / 2;
+                }
+                "input_audio_buffer.clear" => samples = 0,
+                "input_audio_buffer.commit" => {
+                    items += 1;
+                    let item = format!("item{items}");
+                    let committed =
+                        json!({"type": "input_audio_buffer.committed", "item_id": item});
+                    let _ = socket.send(say(committed)).await;
+                    let words = format!(" heard {samples} samples ");
+                    let completed = json!({"type": "conversation.item.input_audio_transcription.completed", "item_id": item, "transcript": words});
+                    let _ = socket.send(say(completed)).await;
+                    samples = 0;
                 }
                 "response.create" => {
                     let text = event["response"]["input"][0]["content"][0]["text"]
@@ -1224,6 +1255,54 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
         }
         assert!(seen.lock().unwrap().is_empty(), "nothing reached OpenAI");
+    }
+
+    #[tokio::test]
+    async fn streamed_speech_comes_back_as_words_when_its_turn_is_committed() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as Frame;
+        let (base, seen) = openai_fake(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = stored(
+            dir.path(),
+            "",
+            "complete",
+            Some(Voice::new("k".into(), base)),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut browser, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/listen"))
+                .await
+                .unwrap();
+        // A false start is cleared; then two 32 ms frames at 16 kHz are one turn.
+        let frame = |samples: usize| Frame::Binary(vec![0; samples * 2].into());
+        browser.send(frame(300)).await.unwrap();
+        browser
+            .send(Frame::Text(r#"{"type":"clear"}"#.into()))
+            .await
+            .unwrap();
+        browser.send(frame(512)).await.unwrap();
+        browser.send(frame(512)).await.unwrap();
+        browser
+            .send(Frame::Text(r#"{"type":"commit","turn":7}"#.into()))
+            .await
+            .unwrap();
+        let reply = loop {
+            match browser.next().await.unwrap().unwrap() {
+                Frame::Text(text) => break serde_json::from_str::<Value>(&text).unwrap(),
+                _ => continue,
+            }
+        };
+        assert_eq!(reply, json!({"turn": 7, "text": "heard 1536 samples"}));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0]["query"], "intent=transcription");
+        assert_eq!(seen[0]["authorization"], "Bearer k");
+        let input = &seen[1]["event"]["session"]["audio"]["input"];
+        assert_eq!(input["format"]["rate"], 24_000);
+        assert_eq!(input["transcription"]["model"], "gpt-live-transcribe");
+        assert_eq!(input["turn_detection"], Value::Null);
     }
 
     #[tokio::test]

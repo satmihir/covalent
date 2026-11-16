@@ -1,11 +1,14 @@
-//! Speech: dictated turns through OpenAI transcription, and replies read aloud through an
-//! OpenAI Realtime session told to read text exactly.
+//! Speech: dictated turns through OpenAI transcription, voice mode's speech transcribed as it
+//! streams in, and replies read aloud through an OpenAI Realtime session told to read text
+//! exactly.
 
 use crate::chats::{Chats, Event, Failure, Reply};
 use crate::speakable::Cutter;
+use axum::extract::ws::{Message as Ws, WebSocket};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -17,6 +20,8 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message as Frame};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const TRANSCRIBE_MODEL: &str = "gpt-transcribe";
+/// LISTEN_MODEL writes words while they are spoken, so a turn's text is ready soon after it ends.
+const LISTEN_MODEL: &str = "gpt-live-transcribe";
 const SPEECH_MODEL: &str = "gpt-realtime-2.1-mini";
 const VOICE: &str = "marin";
 
@@ -126,9 +131,40 @@ impl Voice {
     /// Open connects a Realtime session set up to read text aloud, so a failure is reported
     /// before any audio is promised.
     pub async fn open(&self) -> Result<Reader, Failure> {
+        let mut ws = self.connect(&format!("model={SPEECH_MODEL}")).await?;
+        let session = json!({
+            "type": "realtime",
+            "output_modalities": ["audio"],
+            "instructions": READ,
+            "audio": {
+                "input": {"turn_detection": null},
+                "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": VOICE},
+            },
+        });
+        configure(&mut ws, session).await.map_err(failed)?;
+        Ok(Reader { ws })
+    }
+
+    /// Listen connects a Realtime session that transcribes speech while it is streamed in;
+    /// the browser's own speech detector says where each turn ends.
+    pub async fn listen(&self) -> Result<Listener, Failure> {
+        let mut ws = self.connect("intent=transcription").await?;
+        let session = json!({
+            "type": "transcription",
+            "audio": {"input": {
+                "format": {"type": "audio/pcm", "rate": RATE},
+                "transcription": {"model": LISTEN_MODEL},
+                "turn_detection": null,
+            }},
+        });
+        configure(&mut ws, session).await.map_err(failed)?;
+        Ok(Listener { ws })
+    }
+
+    async fn connect(&self, query: &str) -> Result<Upstream, Failure> {
         let url = match self.base.split_once("://") {
-            Some(("https", rest)) => format!("wss://{rest}/realtime?model={SPEECH_MODEL}"),
-            Some(("http", rest)) => format!("ws://{rest}/realtime?model={SPEECH_MODEL}"),
+            Some(("https", rest)) => format!("wss://{rest}/realtime?{query}"),
+            Some(("http", rest)) => format!("ws://{rest}/realtime?{query}"),
             _ => {
                 return Err(failed(format!(
                     "the OpenAI base {:?} is not an HTTP URL",
@@ -153,59 +189,83 @@ impl Voice {
                 )),
                 error => failed(format!("connect to OpenAI speech: {error}")),
             })?;
-        let mut reader = Reader { ws };
-        reader.configure().await.map_err(failed)?;
-        Ok(reader)
+        Ok(ws)
+    }
+}
+
+type Upstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Configure waits for a new Realtime session and gives it its settings.
+async fn configure(ws: &mut Upstream, session: Value) -> Result<(), String> {
+    let created = next(ws).await?;
+    if created["type"] != "session.created" {
+        return Err(format!("OpenAI speech opened with {}", created["type"]));
+    }
+    send(ws, json!({"type": "session.update", "session": session})).await?;
+    loop {
+        let event = next(ws).await?;
+        match event["type"].as_str().unwrap_or("") {
+            "session.updated" => return Ok(()),
+            "error" => return Err(problem(&event)),
+            _ => {}
+        }
+    }
+}
+
+async fn send(ws: &mut Upstream, event: Value) -> Result<(), String> {
+    ws.send(Frame::Text(event.to_string().into()))
+        .await
+        .map_err(|e| format!("OpenAI speech: {e}"))
+}
+
+async fn next(ws: &mut Upstream) -> Result<Value, String> {
+    loop {
+        let frame = timeout(IDLE, ws.next())
+            .await
+            .map_err(|_| "OpenAI speech stopped responding".to_owned())?;
+        if let Some(event) = event(frame)? {
+            return Ok(event);
+        }
+    }
+}
+
+/// Event reads one frame from OpenAI as an event, or None for a frame that carries none.
+fn event(frame: Option<Result<Frame, WsError>>) -> Result<Option<Value>, String> {
+    match frame {
+        None | Some(Ok(Frame::Close(_))) => Err("OpenAI speech closed the connection".into()),
+        Some(Err(e)) => Err(format!("OpenAI speech: {e}")),
+        Some(Ok(Frame::Text(text))) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("OpenAI speech: {e}")),
+        Some(Ok(_)) => Ok(None),
     }
 }
 
 /// Reader is one Realtime session that turns pieces of text into audio.
 pub struct Reader {
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws: Upstream,
 }
 
 impl Reader {
-    async fn configure(&mut self) -> Result<(), String> {
-        let created = self.next().await?;
-        if created["type"] != "session.created" {
-            return Err(format!("OpenAI speech opened with {}", created["type"]));
-        }
-        self.send(json!({"type": "session.update", "session": {
-            "type": "realtime",
-            "output_modalities": ["audio"],
-            "instructions": READ,
-            "audio": {
-                "input": {"turn_detection": null},
-                "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": VOICE},
-            },
-        }}))
-        .await?;
-        loop {
-            let event = self.next().await?;
-            match event["type"].as_str().unwrap_or("") {
-                "session.updated" => return Ok(()),
-                "error" => return Err(problem(&event)),
-                _ => {}
-            }
-        }
-    }
-
     /// Speak reads one piece into `out`. Each piece is a response outside the session's
     /// conversation, so the model never sees earlier pieces and has nothing to reply to.
     /// It returns false when the listener went away.
     pub async fn speak(&mut self, text: &str, out: &mpsc::Sender<Chunk>) -> Result<bool, String> {
-        self.send(json!({"type": "response.create", "response": {
-            "conversation": "none",
-            "output_modalities": ["audio"],
-            "instructions": READ,
-            "input": [{"type": "message", "role": "user",
-                       "content": [{"type": "input_text", "text": text}]}],
-        }}))
+        send(
+            &mut self.ws,
+            json!({"type": "response.create", "response": {
+                "conversation": "none",
+                "output_modalities": ["audio"],
+                "instructions": READ,
+                "input": [{"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": text}]}],
+            }}),
+        )
         .await?;
         loop {
             let event = tokio::select! {
                 _ = out.closed() => return Ok(false),
-                event = self.next() => event?,
+                event = next(&mut self.ws) => event?,
             };
             match event["type"].as_str().unwrap_or("") {
                 "response.output_audio.delta" => {
@@ -233,30 +293,109 @@ impl Reader {
     pub async fn close(mut self) {
         let _ = timeout(Duration::from_secs(2), self.ws.close(None)).await;
     }
+}
 
-    async fn send(&mut self, event: Value) -> Result<(), String> {
-        self.ws
-            .send(Frame::Text(event.to_string().into()))
-            .await
-            .map_err(|e| format!("OpenAI speech: {e}"))
-    }
+/// Listener is one Realtime session that transcribes voice mode's speech as it is spoken.
+pub struct Listener {
+    ws: Upstream,
+}
 
-    async fn next(&mut self) -> Result<Value, String> {
-        loop {
-            let frame = timeout(IDLE, self.ws.next())
-                .await
-                .map_err(|_| "OpenAI speech stopped responding".to_owned())?
-                .ok_or_else(|| "OpenAI speech closed the connection".to_owned())?
-                .map_err(|e| format!("OpenAI speech: {e}"))?;
-            match frame {
-                Frame::Text(text) => {
-                    return serde_json::from_str(&text).map_err(|e| format!("OpenAI speech: {e}"))
+/// Relay carries one voice mode's speech from the browser to OpenAI, and each turn's words
+/// back, until either side closes. The browser sends its speech detector's 16 kHz PCM as
+/// binary frames, `{"type":"commit","turn":N}` when a pause ends turn N, and
+/// `{"type":"clear"}` when what it sent was not speech after all. It hears
+/// `{"turn":N,"text":...}` or `{"turn":N,"error":...}` for each committed turn, and
+/// `{"error":...}` for a failure it cannot tie to one.
+pub async fn relay(mut browser: WebSocket, listener: Listener) {
+    let mut ws = listener.ws;
+    // OpenAI names each committed turn in commit order; its words may come back in any order.
+    let mut committed = VecDeque::new();
+    let mut turns = HashMap::new();
+    loop {
+        tokio::select! {
+            frame = browser.recv() => {
+                let event = match frame {
+                    Some(Ok(Ws::Binary(pcm))) => json!({
+                        "type": "input_audio_buffer.append",
+                        "audio": BASE64.encode(upsampled(&pcm)),
+                    }),
+                    Some(Ok(Ws::Text(text))) => {
+                        let message: Value = serde_json::from_str(&text).unwrap_or_default();
+                        match message["type"].as_str() {
+                            Some("commit") => {
+                                committed.push_back(message["turn"].clone());
+                                json!({"type": "input_audio_buffer.commit"})
+                            }
+                            Some("clear") => json!({"type": "input_audio_buffer.clear"}),
+                            _ => continue,
+                        }
+                    }
+                    Some(Ok(_)) => continue,
+                    _ => break,
+                };
+                if let Err(error) = send(&mut ws, event).await {
+                    eprintln!("covalent: listen: {error}");
+                    break;
                 }
-                Frame::Close(_) => return Err("OpenAI speech closed the connection".into()),
-                _ => {}
+            }
+            frame = ws.next() => {
+                let event = match event(frame) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("covalent: listen: {error}");
+                        break;
+                    }
+                };
+                let item = event["item_id"].as_str().unwrap_or("").to_owned();
+                let reply = match event["type"].as_str().unwrap_or("") {
+                    "input_audio_buffer.committed" => {
+                        if let Some(turn) = committed.pop_front() {
+                            turns.insert(item, turn);
+                        }
+                        continue;
+                    }
+                    "conversation.item.input_audio_transcription.completed" => {
+                        let Some(turn) = turns.remove(&item) else { continue };
+                        let text = event["transcript"].as_str().unwrap_or("").trim();
+                        json!({"turn": turn, "text": text})
+                    }
+                    "conversation.item.input_audio_transcription.failed" => {
+                        let Some(turn) = turns.remove(&item) else { continue };
+                        json!({"turn": turn, "error": problem(&event)})
+                    }
+                    "error" => {
+                        // An error may belong to a commit that will never be named.
+                        committed.clear();
+                        json!({"error": problem(&event)})
+                    }
+                    _ => continue,
+                };
+                if browser.send(Ws::Text(reply.to_string().into())).await.is_err() {
+                    break;
+                }
             }
         }
     }
+    let _ = timeout(Duration::from_secs(2), ws.close(None)).await;
+}
+
+/// Upsampled turns 16 kHz PCM into the 24 kHz OpenAI requires, three samples for every two,
+/// drawing straight lines between the samples it has.
+fn upsampled(pcm: &[u8]) -> Vec<u8> {
+    let samples: Vec<f32> = pcm
+        .chunks_exact(2)
+        .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])))
+        .collect();
+    let mut out = Vec::with_capacity(samples.len() * 3);
+    for i in 0..samples.len() * 3 / 2 {
+        let at = i as f32 * 2.0 / 3.0;
+        let j = at as usize;
+        let after = samples.get(j + 1).copied().unwrap_or(samples[j]);
+        let value = samples[j] + (after - samples[j]) * (at - j as f32);
+        out.extend_from_slice(&(value.round() as i16).to_le_bytes());
+    }
+    out
 }
 
 /// Read_aloud speaks a reply into `out` as it is written, and ends when the reply is spoken,
@@ -347,4 +486,24 @@ fn failed(message: impl Into<String>) -> Failure {
 
 fn rejected() -> Failure {
     Failure::new(502, "voice_failed", "OpenAI rejected OPENAI_API_KEY.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upsampled;
+
+    #[test]
+    fn upsampling_draws_straight_lines_between_samples() {
+        let pcm = |samples: &[i16]| {
+            samples
+                .iter()
+                .flat_map(|s| s.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            upsampled(&pcm(&[0, 300, 600, -900])),
+            pcm(&[0, 200, 400, 600, -400, -900])
+        );
+        assert_eq!(upsampled(&pcm(&[])), pcm(&[]));
+    }
 }

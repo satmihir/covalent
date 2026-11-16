@@ -36,7 +36,9 @@ const MAX_STEPS: u64 = 30;
 const SPOKEN: &str = "The user said this message aloud in voice mode, so it may contain \
     transcription errors; answer what they most likely meant. Your reply will be read aloud: \
     answer in short, natural spoken sentences, without Markdown, lists, tables, code or URLs, \
-    and keep it brief unless they ask for detail.";
+    and keep it brief unless they ask for detail. They are waiting to hear you, so answer from \
+    what you know; search the web only when the answer depends on recent or local facts you \
+    do not have, and then search once.";
 
 /// MAX_ATTACHMENTS bounds the files one message can bring, and so the note that lists them.
 const MAX_ATTACHMENTS: usize = 10;

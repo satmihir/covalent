@@ -39,7 +39,7 @@ function vad(): Plugin {
 export default defineConfig({
   plugins: [react(), vad()],
   server: {
-    proxy: { "/api": "http://127.0.0.1:7420" },
+    proxy: { "/api": { target: "http://127.0.0.1:7420", ws: true } },
   },
   // ONNX Runtime loads its WebAssembly glue at run time from /vad/; pre-bundling breaks that.
   optimizeDeps: { exclude: ["onnxruntime-web"] },

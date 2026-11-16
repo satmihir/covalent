@@ -62,9 +62,14 @@ not appear.
 
 **Voice mode** is the button in place of Send while the message box is empty.
 It listens, sends what you say when you pause, and reads the reply aloud as it
-is written; the thread shows the same conversation as text. A spoken message
-asks the model for a short reply without Markdown, so a typed message in the
-same chat still gets formatting. Talk over a reply, or tap the circle, to stop
+is written; the thread shows the same conversation as text. What you say
+streams to OpenAI while you say it (`gpt-live-transcribe`, through Covalent's
+`/api/listen` WebSocket), so its words are ready a moment after you pause; a
+turn that could not stream is sent whole, as the microphone button does. A
+spoken message asks the model for a short reply without Markdown, and to search
+the web only for recent or local facts, since every search adds seconds before
+you hear anything; a typed message in the same chat still gets formatting and
+searches as usual. Talk over a reply, or tap the circle, to stop
 it: a reply still being written is cancelled. Ending voice mode lets a reply in
 progress finish as text. Pauses are found in the browser by a speech detector
 (Silero, through `@ricky0123/vad-web` and ONNX Runtime), whose files Covalent
@@ -79,7 +84,8 @@ mode pauses and says so; tap the circle to start it again.
 Voice sends recordings, and the text of each reply read aloud, to OpenAI, also
 in chats whose model is Claude. It is billed to the API key, apart from any
 ChatGPT plan: roughly half a cent per minute dictated and three cents per minute
-read aloud. Covalent stores no audio.
+read aloud; voice mode's streaming transcription is billed by OpenAI as well.
+Covalent stores no audio.
 
 The key is also one re:agent can use for chat. While your ChatGPT login is
 valid, chats still use the plan, but if the login lapses re:agent falls back to

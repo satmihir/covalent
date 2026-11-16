@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, describe } from "./api";
 import { play, wav } from "./audio";
 import { CloseIcon, MicIcon, MicOffIcon } from "./icons";
+import { Listen } from "./listen";
 import { VoiceLoop, type Reply, type VoiceStatus } from "./voiceLoop";
 
 /** RATE is the sample rate of the utterances the speech detector hands over. */
@@ -44,6 +45,7 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
   const [level, setLevel] = useState(0);
   const loop = useRef<VoiceLoop | null>(null);
   const detector = useRef<MicVAD | null>(null);
+  const listening = useRef<Listen | null>(null);
   const resume = useRef<() => void>(() => {});
   const mutedNow = useRef(false);
   mutedNow.current = muted;
@@ -55,8 +57,11 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
     let closed = false;
     // Made while handling the click that opened voice mode, so browsers let it play later.
     const speakers = new AudioContext();
+    // Speech streams to the server as it is spoken; a turn it could not stream is sent whole.
+    const listen = new Listen(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/listen`);
+    listening.current = listen;
     const voice = new VoiceLoop({
-      transcribe: (audio) => api.transcribe(wav(audio, RATE)),
+      transcribe: (audio) => listen.commit().catch(() => api.transcribe(wav(audio, RATE))),
       send: (text) => latest.current.send(text),
       speak: (reply, onAudio) => play(api.speechUrl(reply.chatId, reply.replyId), onAudio, speakers),
       pending: (replyId) => latest.current.pending(replyId),
@@ -89,6 +94,7 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
       if (closed || paused_ || !detector.current) return;
       paused_ = true;
       voice.pause();
+      listen.discard();
       void detector.current.pause();
       void lock?.release();
       setPaused(true);
@@ -131,9 +137,14 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
       resumeStream: microphone,
       // A pause this long ends a turn; shorter ones are a breath inside it.
       redemptionMs: 800,
+      onSpeechStart: () => listen.start(),
       onSpeechRealStart: () => voice.speechStarted(),
+      onVADMisfire: () => listen.discard(),
       onSpeechEnd: (audio) => void voice.heard(audio),
-      onFrameProcessed: (probabilities) => setLevel(probabilities.isSpeech),
+      onFrameProcessed: (probabilities, frame) => {
+        listen.frame(frame);
+        setLevel(probabilities.isSpeech);
+      },
     }).then(
       (vad) => {
         if (closed) return void vad.destroy();
@@ -157,6 +168,7 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
       document.removeEventListener("visibilitychange", returned);
       void lock?.release();
       voice.close();
+      listen.close();
       void detector.current?.destroy();
       detector.current = null;
       void speakers.close();
@@ -167,7 +179,10 @@ export function Voice({ send, pending, cancel, searching, onError, onClose }: Pr
     const vad = detector.current;
     if (!vad) return;
     if (muted) void vad.start();
-    else void vad.pause();
+    else {
+      void vad.pause();
+      listening.current?.discard();
+    }
     setMuted(!muted);
     setLevel(0);
   };
