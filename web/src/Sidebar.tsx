@@ -1,5 +1,5 @@
 import type { Chat } from "./api";
-import { ArchiveIcon, Logo, NewChatIcon } from "./icons";
+import { ArchiveIcon, Logo, NewChatIcon, ProfileIcon } from "./icons";
 
 type Props = {
   chats: Chat[];
@@ -8,6 +8,7 @@ type Props = {
   onSelect: (id: string) => void;
   onNew: () => void;
   onArchive: (id: string) => void;
+  onPersonalize: () => void;
   onClose: () => void;
 };
 
@@ -22,7 +23,7 @@ function group(ms: number, midnight: number): string {
   return "Older";
 }
 
-export function Sidebar({ chats, currentId, open, onSelect, onNew, onArchive, onClose }: Props) {
+export function Sidebar({ chats, currentId, open, onSelect, onNew, onArchive, onPersonalize, onClose }: Props) {
   const midnight = new Date().setHours(0, 0, 0, 0);
   const groups: { label: string; chats: Chat[] }[] = [];
   for (const chat of chats) {
@@ -82,6 +83,12 @@ export function Sidebar({ chats, currentId, open, onSelect, onNew, onArchive, on
           ))}
           {chats.length === 0 && <p className="chat-list-empty">Your chats will appear here.</p>}
         </nav>
+        <div className="sidebar-foot">
+          <button className="profile-button" onClick={onPersonalize}>
+            <ProfileIcon />
+            <span>Personalization</span>
+          </button>
+        </div>
       </aside>
     </>
   );

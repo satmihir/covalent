@@ -12,6 +12,14 @@ export type Chat = {
 
 export type Model = { id: string; provider: string; note: string };
 
+/** Personalization is what the user tells every chat about themselves. */
+export type Personalization = {
+  instructions: string;
+  nickname: string;
+  occupation: string;
+  about: string;
+};
+
 export type MessageStatus = "pending" | "complete" | "failed" | "cancelled" | "interrupted";
 
 export type Source = { url: string; title: string };
@@ -115,6 +123,13 @@ export const api = {
   chat: (id: string) =>
     request<{ chat: Chat; messages: Message[]; previews: Record<string, Preview> }>("GET", `/api/chats/${id}`),
   models: () => request<{ models: Model[]; default: string | null }>("GET", "/api/models"),
+  personalization: () =>
+    request<{ personalization: Personalization }>("GET", "/api/personalization").then((d) => d.personalization),
+  /** personalize saves every field and returns them as stored, trimmed. */
+  personalize: (fields: Personalization) =>
+    request<{ personalization: Personalization }>("PUT", "/api/personalization", fields).then(
+      (d) => d.personalization,
+    ),
   create: (model: string | null) =>
     request<{ chat: Chat }>("POST", "/api/chats", { model }).then((d) => d.chat),
   switchModel: (id: string, model: string) =>

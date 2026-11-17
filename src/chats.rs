@@ -1,5 +1,6 @@
 use crate::activity::Action;
 use crate::files::Attachment;
+use crate::personalization::{Personalization, CLEARED};
 use crate::store::{Chat, Image, Message, Store};
 use reagent::session_api::{
     self, ApiError, CommandState, EntryCursor, EventCursor, EventKind, HistoryMode, PlanMode,
@@ -420,7 +421,17 @@ impl Chats {
         }
         let first = messages.is_empty();
         let api = self.session(chat_id)?;
-        let note = note(spoken, &attached);
+        // A Session's instructions are fixed when it opens, so the personalization reaches a
+        // chat as a note, once per change; history keeps it, and the cached prefix stays put.
+        let (personal, sent) = {
+            let store = self.store.lock().unwrap();
+            (
+                store.personalization()?.context(),
+                store.personalization_sent(chat_id)?,
+            )
+        };
+        let told = (personal != sent).then(|| personal.as_deref().unwrap_or(CLEARED));
+        let note = note(told, spoken, &attached);
         let start = start(&api.get_snapshot()?);
         let submit = |api: &SessionApi| match &note {
             Some(note) => {
@@ -465,6 +476,7 @@ impl Chats {
             let store = self.store.lock().unwrap();
             store.insert_message(&user)?;
             store.insert_message(&reply)?;
+            store.set_personalization_sent(chat_id, personal.as_deref())?;
         }
         // The reply's preview exists until it finishes, so nothing can announce it afterwards.
         self.previews
@@ -527,6 +539,19 @@ impl Chats {
                 Ok((attachment, crate::files::kind(&file)))
             })
             .collect()
+    }
+
+    /// Personalization returns what the user set for all chats.
+    pub fn personalization(&self) -> Result<Personalization, Failure> {
+        Ok(self.store.lock().unwrap().personalization()?)
+    }
+
+    /// Set_personalization saves what the user set for all chats, trimmed; each chat hears of
+    /// it with its next message.
+    pub fn set_personalization(&self, p: &Personalization) -> Result<Personalization, Failure> {
+        let p = p.checked()?;
+        self.store.lock().unwrap().set_personalization(&p)?;
+        Ok(p)
     }
 
     /// Upload saves a file the user is about to send into the chat's folder.
@@ -804,10 +829,11 @@ impl Chats {
     }
 }
 
-/// Note is what the model is told beside a message: that it was spoken, and which files the
-/// user attached.
-fn note(spoken: bool, attached: &[(Attachment, &str)]) -> Option<String> {
+/// Note is what the model is told beside a message: what the user set about themselves, if
+/// it is news to this chat, that the message was spoken, and which files the user attached.
+fn note(personal: Option<&str>, spoken: bool, attached: &[(Attachment, &str)]) -> Option<String> {
     let mut parts = Vec::new();
+    parts.extend(personal.map(str::to_owned));
     if spoken {
         parts.push(SPOKEN.to_owned());
     }

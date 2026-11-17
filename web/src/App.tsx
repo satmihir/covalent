@@ -20,6 +20,7 @@ import { Files } from "./Files";
 import { touched } from "./fileView";
 import { FolderIcon, MenuIcon, NewChatIcon } from "./icons";
 import { ModelPicker } from "./ModelPicker";
+import { Personalization } from "./Personalization";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./Thread";
 
@@ -82,6 +83,7 @@ export function App() {
   const [dropping, setDropping] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [personalizing, setPersonalizing] = useState(false);
   // openChat is the open chat as last read, including an archived one the sidebar omits.
   const [openChat, setOpenChat] = useState<Chat | null>(null);
   const [models, setModels] = useState<Model[]>([]);
@@ -416,6 +418,7 @@ export function App() {
         onSelect={(id) => open(id)}
         onNew={() => open(null)}
         onArchive={(id) => void archive(id)}
+        onPersonalize={() => setPersonalizing(true)}
         onClose={() => setSidebarOpen(false)}
       />
       <main
@@ -530,6 +533,7 @@ export function App() {
           onClose={() => setFilesOpen(false)}
         />
       )}
+      {personalizing && <Personalization onClose={() => setPersonalizing(false)} />}
     </div>
   );
 }

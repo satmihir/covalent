@@ -1,5 +1,6 @@
 use crate::activity::Action;
 use crate::files::Attachment;
+use crate::personalization::Personalization;
 use reagent::session_api::Source;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,10 @@ impl Store {
                 status TEXT NOT NULL,
                 reason TEXT,
                 created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS personalization (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                fields TEXT NOT NULL
             );",
         )?;
         // Columns added after the first release; SQLite has no ADD COLUMN IF NOT EXISTS.
@@ -86,6 +91,7 @@ impl Store {
             ("chats", "workspace", "TEXT"),
             ("messages", "activity", "TEXT"),
             ("messages", "attachments", "TEXT"),
+            ("chats", "personalization", "TEXT"),
         ] {
             let columns: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
@@ -169,6 +175,49 @@ impl Store {
         self.conn.execute(
             "UPDATE chats SET title = ?2 WHERE id = ?1",
             params![chat_id, title],
+        )?;
+        Ok(())
+    }
+
+    /// Personalization returns what the user set for all chats, empty until they set it.
+    pub fn personalization(&self) -> rusqlite::Result<Personalization> {
+        let fields: Option<String> = self
+            .conn
+            .query_row("SELECT fields FROM personalization", [], |row| row.get(0))
+            .optional()?;
+        Ok(fields
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default())
+    }
+
+    /// Set_personalization replaces what the user set for all chats.
+    pub fn set_personalization(&self, p: &Personalization) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO personalization (id, fields) VALUES (1, ?1)",
+            [serde_json::to_string(p).unwrap()],
+        )?;
+        Ok(())
+    }
+
+    /// Personalization_sent returns the personalization note a chat's model last received.
+    pub fn personalization_sent(&self, chat_id: &str) -> rusqlite::Result<Option<String>> {
+        self.conn.query_row(
+            "SELECT personalization FROM chats WHERE id = ?1",
+            [chat_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Set_personalization_sent records the personalization note a chat's model now has,
+    /// or none once it was told the personalization was cleared.
+    pub fn set_personalization_sent(
+        &self,
+        chat_id: &str,
+        note: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET personalization = ?2 WHERE id = ?1",
+            params![chat_id, note],
         )?;
         Ok(())
     }
@@ -362,6 +411,31 @@ mod tests {
         assert_eq!(
             store.chat("older").unwrap().unwrap().archived_at_ms,
             Some(4)
+        );
+    }
+
+    #[test]
+    fn personalization_and_what_each_chat_was_told_survive_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("covalent.db");
+        let set = Personalization {
+            nickname: "Sam".into(),
+            about: "Bakes on weekends.".into(),
+            ..Personalization::default()
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.personalization().unwrap(), Personalization::default());
+            store.create_chat("c", "m", None, 1).unwrap();
+            assert_eq!(store.personalization_sent("c").unwrap(), None);
+            store.set_personalization(&set).unwrap();
+            store.set_personalization_sent("c", Some("note")).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.personalization().unwrap(), set);
+        assert_eq!(
+            store.personalization_sent("c").unwrap().as_deref(),
+            Some("note")
         );
     }
 

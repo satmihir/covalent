@@ -2,6 +2,7 @@ mod activity;
 mod chats;
 mod files;
 mod http;
+mod personalization;
 mod speakable;
 mod speech;
 mod store;

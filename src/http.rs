@@ -1,4 +1,5 @@
 use crate::chats::{Chats, Failure, Reply};
+use crate::personalization::Personalization;
 use crate::speech::{self, Voice};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
@@ -59,6 +60,10 @@ pub fn router(
                 .layer(DefaultBodyLimit::max(crate::files::MAX_UPLOAD)),
         )
         .route("/api/models", get(models))
+        .route(
+            "/api/personalization",
+            get(personalization).put(set_personalization),
+        )
         .route("/api/chats", get(list).post(create))
         .route("/api/chats/{id}", get(chat))
         .route("/api/chats/{id}/messages", post(send))
@@ -157,6 +162,18 @@ async fn models(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
         Ok(json!({"models": models, "default": default}))
     })
     .await
+}
+
+async fn personalization(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
+    blocking(move || Ok(json!({"personalization": chats.personalization()?}))).await
+}
+
+/// Set_personalization replaces every field; a field left out is saved empty.
+async fn set_personalization(
+    State(chats): State<Arc<Chats>>,
+    Json(body): Json<Personalization>,
+) -> impl IntoResponse {
+    blocking(move || Ok(json!({"personalization": chats.set_personalization(&body)?}))).await
 }
 
 /// Create takes an optional `{"model": id}`; without one the chat uses Covalent's default.
@@ -670,16 +687,17 @@ mod tests {
                         json!({"type":"response.completed","response":{"id":"fixture","status":"completed","model":"gpt-6.1-sol","output":output,"usage":{"input_tokens":5,"output_tokens":2}}})
                     };
                     let delta = |text: &str| json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":text});
+                    let log = if title { "titles.log" } else { "requests.log" };
+                    let mut log = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(release.with_file_name(log))
+                        .unwrap();
+                    writeln!(log, "{}", body["input"]).unwrap();
                     if title {
                         send(done("Baking Bread", false));
                         return;
                     }
-                    let mut log = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(release.with_file_name("requests.log"))
-                        .unwrap();
-                    writeln!(log, "{}", body["input"]).unwrap();
                     let input = body["input"].to_string();
                     if input.contains("function_call_output") {
                         let text = if input.contains("write_file") {
@@ -1494,6 +1512,99 @@ mod tests {
         assert!(last.contains("and typed") && !last.contains(note), "{last}");
         let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
         assert_eq!(body["messages"][0]["text"], "what rises");
+    }
+
+    #[tokio::test]
+    async fn personalization_is_saved_trimmed_and_refused_over_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app(dir.path(), &["unused"]);
+        let uri = "/api/personalization";
+        let (status, empty) = call(&app, "GET", uri, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{empty}");
+        let blank = json!({"instructions": "", "nickname": "", "occupation": "", "about": ""});
+        assert_eq!(empty["personalization"], blank);
+        let (status, saved) = call(&app, "PUT", uri, json!({"nickname": "  Sam \n"})).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (_, read) = call(&app, "GET", uri, Value::Null).await;
+        assert_eq!(read["personalization"]["nickname"], "Sam");
+        assert_eq!(read, saved);
+        let long = json!({"nickname": "x".repeat(101)});
+        let (status, body) = call(&app, "PUT", uri, long).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (_, read) = call(&app, "GET", uri, Value::Null).await;
+        assert_eq!(read["personalization"]["nickname"], "Sam");
+    }
+
+    #[tokio::test]
+    async fn personalization_reaches_a_chat_once_per_change_and_never_its_title() {
+        let release = tempfile::tempdir().unwrap();
+        let release_file = release.path().join("release");
+        std::fs::write(&release_file, b"").unwrap();
+        std::fs::write(release.path().join("searched"), b"").unwrap();
+        let env = [
+            ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
+            (
+                "REAGENT_OPENAI_BASE_URL",
+                stream_provider(release_file.clone()),
+            ),
+            ("COVALENT_TEST_RELEASE", release_file.display().to_string()),
+        ];
+        if !isolated(
+            "http::tests::personalization_reaches_a_chat_once_per_change_and_never_its_title",
+            &env,
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, id) = fake_chat(dir.path()).await;
+        let personalize = |fields: Value| {
+            let app = app.clone();
+            async move {
+                let (status, body) = call(&app, "PUT", "/api/personalization", fields).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+        };
+        let send = |request: &'static str| {
+            let (app, id) = (app.clone(), id.clone());
+            async move {
+                let message = json!({"request_id": request, "text": format!("turn {request}")});
+                call(&app, "POST", &format!("/api/chats/{id}/messages"), message).await;
+                settled(&app, &id).await;
+            }
+        };
+        personalize(json!({"nickname": "Sam", "occupation": "baker"})).await;
+        send("r1").await;
+        send("r2").await;
+        personalize(json!({"nickname": "Sammy"})).await;
+        send("r3").await;
+        personalize(json!({})).await;
+        send("r4").await;
+
+        let release = PathBuf::from(std::env::var("COVALENT_TEST_RELEASE").unwrap());
+        let log = std::fs::read_to_string(release.with_file_name("requests.log")).unwrap();
+        let latest: Vec<String> = log
+            .lines()
+            .map(|l| {
+                let input: Value = serde_json::from_str(l).unwrap();
+                input.as_array().unwrap().last().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(latest.len(), 4, "{log}");
+        let head = "about themselves in Covalent's personalization settings";
+        assert!(latest[0].contains(head), "{}", latest[0]);
+        assert!(latest[0].contains("Call them: Sam") && latest[0].contains("Occupation: baker"));
+        // An unchanged personalization is not repeated; the first note stays in history.
+        assert!(!latest[1].contains(head), "{}", latest[1]);
+        assert_eq!(log.lines().nth(1).unwrap().matches(head).count(), 1);
+        assert!(latest[2].contains("Call them: Sammy") && !latest[2].contains("Occupation"));
+        assert!(
+            latest[3].contains("cleared their personalization"),
+            "{}",
+            latest[3]
+        );
+        assert!(!latest[3].contains(head));
+        let titles = std::fs::read_to_string(release.with_file_name("titles.log")).unwrap();
+        assert!(!titles.is_empty() && !titles.contains("Sam"), "{titles}");
     }
 
     /// Fetch gets a path from the app with the given headers, returning the response's

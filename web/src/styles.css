@@ -1345,6 +1345,116 @@ button {
   color: var(--text);
 }
 
+.sidebar-foot {
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.profile-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 14px;
+  text-align: left;
+}
+
+.profile-button:hover {
+  background: var(--hover);
+}
+
+.profile-button svg {
+  color: var(--muted);
+}
+
+.personalization {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.personalization::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.personalization h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.personalization-hint {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.personalization label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.personalization input,
+.personalization textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--font);
+  resize: vertical;
+}
+
+.personalization input:focus,
+.personalization textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.personalization-error {
+  margin: 0 0 12px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.personalization-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.personalization-actions button {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 14px;
+}
+
+.personalization-actions .primary {
+  border-color: var(--button);
+  background: var(--button);
+  color: var(--button-text);
+}
+
+.personalization-actions .primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Model picker */
 
 .picker {

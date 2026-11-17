@@ -24,6 +24,16 @@ export function NewChatIcon() {
   );
 }
 
+export function ProfileIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" {...stroke} />
+      <circle cx="12" cy="10" r="3" {...stroke} />
+      <path d="M6.5 18.5a6.5 6.5 0 0 1 11 0" {...stroke} />
+    </svg>
+  );
+}
+
 export function ArrowUpIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
