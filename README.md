@@ -48,14 +48,15 @@ Sessions are saved in re:agent's session store with the origin label
 Personalization, at the bottom of the sidebar, holds four fields for every
 chat: extra instructions and context, a nickname, an occupation, and more about
 you. They are saved in Covalent's store. A Session's instructions are fixed
-when it opens, so the fields reach a chat's model as a note beside your next
-message there, framed as your own context rather than as Covalent's rules. A
-chat is told once per change, new or already open: the note stays in its
-history, so later turns neither repeat it nor disturb the provider's cached
-prompt. Clearing every field tells each chat, once, to disregard the earlier
-note. Empty fields add nothing, title requests never see them, and the free
-text fields are capped at 1000 bytes each. If re:agent compacts a very long
-chat, the note survives only as its summary keeps it.
+when it opens, so the fields reach a chat's model ahead of your next message
+there (the thread shows only what you typed), framed as your own context rather
+than as Covalent's rules. A chat is told once per change, new or already open:
+the text stays in its history, so later turns neither repeat it nor disturb the
+provider's cached prompt. Clearing every field tells each chat, once, to
+disregard the earlier personalization. Empty fields add nothing, title requests
+never see them, and the free text fields are capped at 4000 bytes each. If
+re:agent compacts a very long chat, the personalization survives only as its
+summary keeps it.
 
 ## Web search
 

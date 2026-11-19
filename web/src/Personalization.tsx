@@ -46,7 +46,7 @@ export function Personalization({ onClose }: { onClose: () => void }) {
         </p>
         <label>
           Extra instructions and context for all chats
-          <textarea rows={4} maxLength={1000} placeholder="How should replies sound?" {...field("instructions")} />
+          <textarea rows={6} maxLength={4000} placeholder="How should replies sound?" {...field("instructions")} />
         </label>
         <label>
           Nickname
@@ -58,7 +58,7 @@ export function Personalization({ onClose }: { onClose: () => void }) {
         </label>
         <label>
           More about you
-          <textarea rows={4} maxLength={1000} placeholder="Interests, values, or preferences" {...field("about")} />
+          <textarea rows={6} maxLength={4000} placeholder="Interests, values, or preferences" {...field("about")} />
         </label>
         {error && (
           <p className="personalization-error" role="alert">

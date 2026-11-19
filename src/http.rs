@@ -1528,9 +1528,17 @@ mod tests {
         let (_, read) = call(&app, "GET", uri, Value::Null).await;
         assert_eq!(read["personalization"]["nickname"], "Sam");
         assert_eq!(read, saved);
-        let long = json!({"nickname": "x".repeat(101)});
-        let (status, body) = call(&app, "PUT", uri, long).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let longest =
+            json!({"nickname": "Sam", "about": "x".repeat(4000), "instructions": "y".repeat(4000)});
+        let (status, body) = call(&app, "PUT", uri, longest).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for long in [
+            json!({"nickname": "x".repeat(101)}),
+            json!({"nickname": "Sam", "about": "x".repeat(4001)}),
+        ] {
+            let (status, body) = call(&app, "PUT", uri, long).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
         let (_, read) = call(&app, "GET", uri, Value::Null).await;
         assert_eq!(read["personalization"]["nickname"], "Sam");
     }
@@ -1572,7 +1580,9 @@ mod tests {
                 settled(&app, &id).await;
             }
         };
-        personalize(json!({"nickname": "Sam", "occupation": "baker"})).await;
+        // Longer than re:agent allows a note to be.
+        let about = "Bakes sourdough. ".repeat(200);
+        personalize(json!({"nickname": "Sam", "occupation": "baker", "about": about})).await;
         send("r1").await;
         send("r2").await;
         personalize(json!({"nickname": "Sammy"})).await;
@@ -1593,6 +1603,11 @@ mod tests {
         let head = "about themselves in Covalent's personalization settings";
         assert!(latest[0].contains(head), "{}", latest[0]);
         assert!(latest[0].contains("Call them: Sam") && latest[0].contains("Occupation: baker"));
+        assert!(
+            latest[0].contains(about.trim()) && latest[0].contains("[Their message]\\nturn r1")
+        );
+        let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
+        assert_eq!(body["messages"][0]["text"], "turn r1");
         // An unchanged personalization is not repeated; the first note stays in history.
         assert!(!latest[1].contains(head), "{}", latest[1]);
         assert_eq!(log.lines().nth(1).unwrap().matches(head).count(), 1);

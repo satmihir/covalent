@@ -1,6 +1,6 @@
 use crate::activity::Action;
 use crate::files::Attachment;
-use crate::personalization::{Personalization, CLEARED};
+use crate::personalization::{Personalization, CLEARED, MESSAGE};
 use crate::store::{Chat, Image, Message, Store};
 use reagent::session_api::{
     self, ApiError, CommandState, EntryCursor, EventCursor, EventKind, HistoryMode, PlanMode,
@@ -422,7 +422,8 @@ impl Chats {
         let first = messages.is_empty();
         let api = self.session(chat_id)?;
         // A Session's instructions are fixed when it opens, so the personalization reaches a
-        // chat as a note, once per change; history keeps it, and the cached prefix stays put.
+        // chat ahead of the user's words, once per change; history keeps it, and the cached
+        // prefix stays put. It can be longer than re:agent allows a note to be.
         let (personal, sent) = {
             let store = self.store.lock().unwrap();
             (
@@ -430,14 +431,17 @@ impl Chats {
                 store.personalization_sent(chat_id)?,
             )
         };
-        let told = (personal != sent).then(|| personal.as_deref().unwrap_or(CLEARED));
-        let note = note(told, spoken, &attached);
+        let words = match (personal != sent).then(|| personal.as_deref().unwrap_or(CLEARED)) {
+            Some(told) => format!("{told}\n\n{MESSAGE}\n{text}"),
+            None => text.to_owned(),
+        };
+        let note = note(spoken, &attached);
         let start = start(&api.get_snapshot()?);
         let submit = |api: &SessionApi| match &note {
             Some(note) => {
-                api.send_message_with_note(request_id, text.as_bytes(), note, PlanMode::Keep)
+                api.send_message_with_note(request_id, words.as_bytes(), note, PlanMode::Keep)
             }
-            None => api.send_message(request_id, text.as_bytes(), PlanMode::Keep),
+            None => api.send_message(request_id, words.as_bytes(), PlanMode::Keep),
         };
         let run = match submit(&api) {
             Err(error) if error.code == "resource_exhausted" => {
@@ -829,11 +833,10 @@ impl Chats {
     }
 }
 
-/// Note is what the model is told beside a message: what the user set about themselves, if
-/// it is news to this chat, that the message was spoken, and which files the user attached.
-fn note(personal: Option<&str>, spoken: bool, attached: &[(Attachment, &str)]) -> Option<String> {
+/// Note is what the model is told beside a message: that it was spoken, and which files the
+/// user attached.
+fn note(spoken: bool, attached: &[(Attachment, &str)]) -> Option<String> {
     let mut parts = Vec::new();
-    parts.extend(personal.map(str::to_owned));
     if spoken {
         parts.push(SPOKEN.to_owned());
     }
