@@ -17,6 +17,7 @@ import type { Reply } from "./voiceLoop";
 const Voice = lazy(() => import("./Voice").then((m) => ({ default: m.Voice })));
 import { accept } from "./attachments";
 import { Files } from "./Files";
+import { nativeApp, VOICE_ENDED } from "./nativeApp";
 import { touched } from "./fileView";
 import { FolderIcon, MenuIcon, NewChatIcon } from "./icons";
 import { ModelPicker } from "./ModelPicker";
@@ -259,6 +260,35 @@ export function App() {
     };
   }, [resync, flushPreviews, showPreviews]);
 
+  // In the iPhone app, voice mode is the app's: it says when it has ended, and is told when
+  // this page ends it, by switching chats for one.
+  useEffect(() => {
+    const ended = (event: Event) => {
+      setVoiceMode(false);
+      const reason = (event as CustomEvent<string | null>).detail;
+      if (reason) setNotice({ text: reason, tone: "error" });
+    };
+    addEventListener(VOICE_ENDED, ended);
+    return () => removeEventListener(VOICE_ENDED, ended);
+  }, []);
+  useEffect(() => {
+    const app = nativeApp;
+    if (!voiceMode || !app) return;
+    return () => app.postMessage({ voice: null });
+  }, [voiceMode]);
+
+  /** OpenedChat returns the open chat's ID, creating the chat when a new one is showing. */
+  const openedChat = async (): Promise<string> => {
+    if (current.current) return current.current;
+    const chat = await api.create(newModel);
+    setOpenChat(chat);
+    setChats((list) => [chat, ...list]);
+    current.current = chat.id;
+    setChatId(chat.id);
+    history.pushState(null, "", `/c/${chat.id}`);
+    return chat.id;
+  };
+
   /** Send posts a message, creating the chat first if needed, and returns where its reply is.
    *  New files are uploaded first; files a retried message already sent are named again. */
   const send = async (
@@ -279,15 +309,7 @@ export function App() {
     setMessages((list) => [...list, ...optimistic]);
     let id = current.current;
     try {
-      if (!id) {
-        const chat = await api.create(newModel);
-        setOpenChat(chat);
-        setChats((list) => [chat, ...list]);
-        id = chat.id;
-        current.current = id;
-        setChatId(id);
-        history.pushState(null, "", `/c/${id}`);
-      }
+      id = await openedChat();
       const uploaded = [...paths];
       for (const file of files) {
         uploaded.push((await api.upload(id, file)).path);
@@ -319,10 +341,18 @@ export function App() {
     return reply ? reply.status === "pending" : true;
   };
 
-  const startVoiceMode = () => {
+  const startVoiceMode = async () => {
     stopSpeaking();
     setNotice(null);
     setVoiceReply(null);
+    if (nativeApp) {
+      // The app talks in a chat that exists, so a new one is created before it starts.
+      try {
+        nativeApp.postMessage({ voice: await openedChat() });
+      } catch (error) {
+        return setNotice({ text: describe(error), tone: "error" });
+      }
+    }
     setVoiceMode(true);
   };
 
@@ -493,6 +523,8 @@ export function App() {
             <p className="archived-note">
               This chat is archived. Continue it in a terminal with <code>reagent --resume {chatId}</code>
             </p>
+          ) : voiceMode && nativeApp ? (
+            <div className="voice-native" />
           ) : voiceMode ? (
             <Suspense fallback={<p className="voice-status voice-loading">Starting voice mode…</p>}>
               <Voice
@@ -516,7 +548,7 @@ export function App() {
               onRemove={(file) => setAttached((list) => list.filter((f) => f !== file))}
               onStop={stop}
               voice={voice}
-              onVoiceMode={startVoiceMode}
+              onVoiceMode={() => void startVoiceMode()}
               onError={(text) => setNotice({ text, tone: "error" })}
             />
           )}

@@ -4,6 +4,8 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Covalent listens while voice mode is on, so you can talk to your chat.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Covalent uses the camera when you take a photo to attach to a chat.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

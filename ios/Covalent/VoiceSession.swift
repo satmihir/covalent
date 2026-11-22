@@ -8,26 +8,27 @@ import Observation
 /// locked or another app in front.
 @MainActor @Observable
 final class VoiceSession {
-    enum Status: String {
-        case off = "Off"
-        case starting = "Starting…"
-        case listening = "Listening"
-        case transcribing = "Transcribing…"
-        case thinking = "Thinking…"
-        case speaking = "Speaking"
-        case paused = "Paused by another sound"
+    enum Status {
+        case off, starting, listening, transcribing, thinking, speaking, paused
     }
 
     private(set) var status = Status.off
+    /// error is what went wrong in the last turn. The next turn clears it.
     private(set) var error: String?
     /// level is the microphone's loudness in decibels, for the meter.
     private(set) var level: Float = -100
+    /// muted stops the listening; a reply still plays.
+    private(set) var muted = false
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var detector = SpeechDetector(rate: 16000)
     private var loop: VoiceLoop?
     private var observers: [NSObjectProtocol] = []
+    /// starts counts starts and stops, so a start overtaken by either gives up.
+    private var starts = 0
+    /// ended is told each time voice mode ends, with the reason when something failed.
+    var ended: (String?) -> Void = { _ in }
 
     // Formats never change; the audio thread reads them too.
     nonisolated private static let heard = AVAudioFormat(
@@ -36,30 +37,28 @@ final class VoiceSession {
         commonFormat: .pcmFormatFloat32, sampleRate: Server.speechRate, channels: 1,
         interleaved: false)!
 
-    /// Start opens the microphone and speaker and begins listening. With no chat ID it starts a
-    /// new chat; it returns the chat it talks in, or nil when it could not start.
-    func start(address: String, chatId: String) async -> String? {
-        error = nil
-        guard let url = URL(string: address.trimmingCharacters(in: .whitespaces)),
-            url.scheme == "https" || url.scheme == "http", url.host() != nil
-        else {
-            return fail("Enter Covalent's address, such as https://mac.tail1234.ts.net.")
-        }
+    /// Start opens the microphone and speaker and begins listening, talking in the given chat.
+    /// When it cannot, voice mode ends with the reason.
+    func start(server: Server, chatId: String) async {
+        close()
+        let start = starts
         status = .starting
-        guard await AVAudioApplication.requestRecordPermission() else {
+        let allowed = await AVAudioApplication.requestRecordPermission()
+        guard start == starts else { return }
+        guard allowed else {
             return fail("Covalent can't use the microphone. Allow it in Settings.")
         }
-        let server = Server(base: url)
         do {
-            guard try await server.voice() else {
+            let available = try await server.voice()
+            guard start == starts else { return }
+            guard available else {
                 return fail("Covalent's voice is off: start it with OPENAI_API_KEY set.")
             }
-            let chat = chatId.isEmpty ? try await server.createChat() : chatId
             try open()
             loop = VoiceLoop(
                 .init(
                     transcribe: { try await server.transcribe(wav: wav($0, rate: 16000)) },
-                    send: { try await server.send(chatId: chat, text: $0) },
+                    send: { try await server.send(chatId: chatId, text: $0) },
                     speak: { [unowned self] in speak(server.speech($0), onAudio: $1) },
                     // A reply that can't be asked about is treated as finished.
                     pending: { (try? await server.pending($0)) ?? false },
@@ -68,14 +67,26 @@ final class VoiceSession {
                     onError: { [unowned self] in error = $0.localizedDescription }
                 ))
             status = .listening
-            return chat
         } catch {
-            return fail(error.localizedDescription)
+            guard start == starts else { return }
+            fail(error.localizedDescription)
         }
     }
 
     /// Stop ends voice mode; a reply still being written finishes as text.
     func stop() {
+        close()
+        ended(nil)
+    }
+
+    private func fail(_ message: String) {
+        close()
+        ended(message)
+    }
+
+    /// Close lets go of the microphone, the speaker and the turn in hand.
+    private func close() {
+        starts += 1
         loop?.close()
         loop = nil
         player.stop()
@@ -86,13 +97,21 @@ final class VoiceSession {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         detector = SpeechDetector(rate: 16000)
         level = -100
+        muted = false
+        error = nil
         status = .off
     }
 
-    private func fail(_ message: String) -> String? {
-        error = message
-        status = .off
-        return nil
+    /// Interrupt stops the reply being waited for or read aloud.
+    func interrupt() {
+        loop?.interrupt()
+    }
+
+    func toggleMute() {
+        muted.toggle()
+        // What was heard before the mute is not part of what is said after it.
+        detector = SpeechDetector(rate: 16000)
+        level = -100
     }
 
     /// Open sets up the audio session and engine: voice chat mode on the loudspeaker, with the
@@ -150,8 +169,7 @@ final class VoiceSession {
         do {
             try run()
         } catch {
-            self.error = "Voice mode stopped: \(error.localizedDescription)"
-            stop()
+            fail("Voice mode stopped: \(error.localizedDescription)")
         }
     }
 
@@ -177,7 +195,7 @@ final class VoiceSession {
     }
 
     private func hear(_ frame: [Float]) {
-        guard status != .off, status != .paused, !frame.isEmpty else { return }
+        guard status != .off, status != .paused, !muted, !frame.isEmpty else { return }
         level = SpeechDetector.level(frame)
         for event in detector.feed(frame) {
             switch event {
@@ -190,6 +208,7 @@ final class VoiceSession {
     }
 
     private func show(_ status: VoiceStatus) {
+        if status == .transcribing { error = nil }
         switch status {
         case .listening: self.status = .listening
         case .transcribing: self.status = .transcribing
@@ -237,18 +256,21 @@ final class VoiceSession {
     /// Interrupted pauses voice mode for a call or Siri and resumes it afterwards.
     private func interrupted(began: Bool) {
         guard status != .off else { return }
-        if began {
-            loop?.pause()
-            status = .paused
-            return
-        }
+        guard began else { return resume() }
+        loop?.pause()
+        status = .paused
+    }
+
+    /// Resume takes the microphone back after a pause. iOS does not always say when a pause
+    /// is over, so the bar offers it too.
+    func resume() {
+        guard status == .paused else { return }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
             try run()
             status = .listening
         } catch {
-            self.error = "Voice mode could not resume: \(error.localizedDescription)"
-            stop()
+            fail("Voice mode could not resume: \(error.localizedDescription)")
         }
     }
 }

@@ -64,14 +64,53 @@ and the phone is tested once at the end:
 | Part | What | Checked by |
 |---|---|---|
 | 15a (built) | `VoiceLoop.swift`, the page's turn-taking rules with its ten scenarios; `VoiceSession` is now only the microphone, speaker and server | `swift test` |
-| 15b | The first-run screen and the chat in a web view | The simulator |
-| 15c | The bridge and the voice bar | Web tests and the simulator |
+| 15b (built) | The first-run screen and the chat in a web view | The simulator |
+| 15c (built) | The bridge and the voice bar | Web tests and the simulator |
 | 15d | Speech streamed to `/api/listen` while spoken, as the page now does | `swift test`, then a spoken turn |
 
 As built in 15a: whether a reply is still being written is asked of the server
 (`GET /api/chats/{id}`), since the app has no event stream of its own, so the
 loop's `pending` is asynchronous where the page's is not. A failed send is
 reported like any other failure; the page reports its own.
+
+As built in 15b:
+
+- `Setup.swift` asks for the address and keeps it once `GET /api/voice`
+  answers as Covalent. A bare name is taken to be HTTPS.
+- `ChatView.swift` shows the page. A load that fails offers to try again or
+  change the address, which is the only way to change it; there is no
+  settings entry.
+- Any other site, a link that asks for a new window and a download all open in
+  Safari, which can save a file to Files. Downloads inside the app are still
+  step 16.
+- The page itself is fetched fresh at each start, since Covalent serves it
+  with no cache headers and the web view otherwise keeps a stale copy.
+- The page's text fields are 16px on touch screens, because iOS zooms into a
+  smaller one and stays zoomed. This is the one change outside `ios/`.
+- The proof screen is gone.
+- Not tried: the on-screen keyboard (the simulator had a hardware one), a
+  download, taking a photo to attach, and anything on a phone.
+
+As built in 15c:
+
+- The bridge is `web/src/nativeApp.ts` and the web view in `ChatView.swift`.
+  Inside the app the page posts `{voice: <chat id>}` to start voice mode and
+  `{voice: null}` when it ends it itself, by switching chats for one. The app
+  sends the window event `covalent-voice-ended` each time its voice mode ends,
+  with the reason as the event's detail when something failed; the page shows
+  the reason as its usual notice.
+- The page creates the chat before it asks, so starting voice mode on a new
+  chat and ending it without speaking leaves an empty chat behind. The page's
+  own voice mode creates the chat with the first message.
+- `VoiceBar.swift` lies over the foot of the page, where the page leaves 76
+  points for it and hides its footnote. It shows the status, a microphone
+  meter and a turn's error, with mute and end; tapping the status interrupts a
+  reply or resumes after a pause. Putting the bar under a shorter web view was
+  tried first and left the page out of place when a field had focus.
+- If iOS ends the page's process while the app is behind another, the page
+  reloads without knowing voice mode is on: the conversation carries on and
+  the bar stays, but the message box shows behind it until voice mode ends.
+- Not tried: a spoken turn through the bridge, and anything on a phone.
 
 This is a design, not a plan with settled steps: the parts marked "to verify"
 have not been tried on a device. When code exists and disagrees with this

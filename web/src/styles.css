@@ -1536,6 +1536,27 @@ button {
   color: var(--muted);
 }
 
+/* The iPhone app lays its own voice bar over the foot of the page, which leaves it this room:
+   VoiceBar.height in ios/. */
+
+.voice-native {
+  height: 76px;
+}
+
+.voice-native + .footnote {
+  display: none;
+}
+
+/* iOS zooms the page into a focused field whose text is under 16px, and stays zoomed. */
+
+@media (hover: none) {
+  .composer textarea,
+  .personalization input,
+  .personalization textarea {
+    font-size: 16px;
+  }
+}
+
 /* Narrow screens: the sidebar becomes a drawer. */
 
 @media (max-width: 768px) {

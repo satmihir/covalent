@@ -29,19 +29,25 @@ public struct Server: Sendable {
         self.base = base
     }
 
-    /// Voice reports whether Covalent can transcribe and speak, which needs its OpenAI key.
-    public func voice() async throws -> Bool {
-        let body = try await json("GET", "api/voice")
-        return body["available"] as? Bool ?? false
+    /// Init takes an address as typed. A bare name is taken to be HTTPS; nil means it is not
+    /// an HTTP address at all.
+    public init?(address: String) {
+        let typed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty,
+            let url = URL(string: typed.contains("://") ? typed : "https://" + typed),
+            url.scheme == "https" || url.scheme == "http", url.host() != nil
+        else { return nil }
+        base = url
     }
 
-    /// CreateChat starts a chat with Covalent's default model and returns its ID.
-    public func createChat() async throws -> String {
-        let body = try await json("POST", "api/chats", body: Data("{}".utf8))
-        guard let chat = body["chat"] as? [String: Any], let id = chat["id"] as? String else {
-            throw Failure(message: "Covalent did not return the new chat.")
+    /// Voice reports whether Covalent can transcribe and speak, which needs its OpenAI key.
+    /// It fails when the address answers but is not Covalent.
+    public func voice() async throws -> Bool {
+        let body = try await json("GET", "api/voice")
+        guard let available = body["available"] as? Bool else {
+            throw Failure(message: "That address answered, but not as Covalent.")
         }
-        return id
+        return available
     }
 
     /// Transcribe turns a recorded utterance into text.
