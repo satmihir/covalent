@@ -2,10 +2,10 @@ import AVFoundation
 import CovalentVoice
 import Observation
 
-/// VoiceSession is the proof's voice mode. It listens with echo cancellation, sends each
-/// utterance to a Covalent chat as a spoken message, and reads the reply aloud as it is
-/// written, until stopped. Because the app records and plays audio, iOS keeps it running with
-/// the phone locked or another app in front.
+/// VoiceSession is voice mode's microphone, speaker and server, wired to the turn-taking rules
+/// in VoiceLoop. It listens with echo cancellation and reads each reply aloud as it is written,
+/// until stopped. Because the app records and plays audio, iOS keeps it running with the phone
+/// locked or another app in front.
 @MainActor @Observable
 final class VoiceSession {
     enum Status: String {
@@ -26,11 +26,7 @@ final class VoiceSession {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var detector = SpeechDetector(rate: 16000)
-    private var server: Server?
-    private var chatId = ""
-    /// turn changes whenever the user starts over, so work for an older turn stops.
-    private var turn = 0
-    private var work: Task<Void, Never>?
+    private var loop: VoiceLoop?
     private var observers: [NSObjectProtocol] = []
 
     // Formats never change; the audio thread reads them too.
@@ -58,20 +54,30 @@ final class VoiceSession {
             guard try await server.voice() else {
                 return fail("Covalent's voice is off: start it with OPENAI_API_KEY set.")
             }
-            self.chatId = chatId.isEmpty ? try await server.createChat() : chatId
-            self.server = server
+            let chat = chatId.isEmpty ? try await server.createChat() : chatId
             try open()
+            loop = VoiceLoop(
+                .init(
+                    transcribe: { try await server.transcribe(wav: wav($0, rate: 16000)) },
+                    send: { try await server.send(chatId: chat, text: $0) },
+                    speak: { [unowned self] in speak(server.speech($0), onAudio: $1) },
+                    // A reply that can't be asked about is treated as finished.
+                    pending: { (try? await server.pending($0)) ?? false },
+                    cancel: { reply in Task { try? await server.cancel(chatId: reply.chatId) } },
+                    onStatus: { [unowned self] in show($0) },
+                    onError: { [unowned self] in error = $0.localizedDescription }
+                ))
+            status = .listening
+            return chat
         } catch {
             return fail(error.localizedDescription)
         }
-        status = .listening
-        return self.chatId
     }
 
     /// Stop ends voice mode; a reply still being written finishes as text.
     func stop() {
-        turn += 1
-        work?.cancel()
+        loop?.close()
+        loop = nil
         player.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -176,85 +182,63 @@ final class VoiceSession {
         for event in detector.feed(frame) {
             switch event {
             case .started:
-                // Talking over the assistant stops it, as on the page.
-                if status == .thinking || status == .speaking { interrupt() }
+                loop?.speechStarted()
             case .ended(let utterance):
-                begin(utterance)
+                Task { await loop?.heard(utterance) }
             }
         }
     }
 
-    /// Interrupt stops the current turn's speech and its reply, if still being written.
-    private func interrupt() {
-        turn += 1
-        work?.cancel()
-        player.stop()
-        player.play()
-        if let server {
-            let chatId = self.chatId
-            Task { try? await server.cancel(chatId: chatId) }
+    private func show(_ status: VoiceStatus) {
+        switch status {
+        case .listening: self.status = .listening
+        case .transcribing: self.status = .transcribing
+        case .thinking: self.status = .thinking
+        case .speaking: self.status = .speaking
         }
-        status = .listening
     }
 
-    /// Begin starts a turn from an utterance, replacing any unfinished one.
-    private func begin(_ utterance: [Float]) {
-        guard let server else { return }
-        if status == .thinking || status == .speaking { interrupt() }
-        turn += 1
-        let turn = self.turn
-        let chatId = self.chatId
-        work?.cancel()
-        work = Task {
-            do {
-                status = .transcribing
-                let text = try await server.transcribe(wav: wav(utterance, rate: 16000))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard turn == self.turn else { return }
-                guard !text.isEmpty else {
-                    status = .listening
-                    return
+    /// Speak plays a reply's speech as it arrives. Its done returns once the last of it is heard.
+    private func speak(
+        _ stream: AsyncThrowingStream<[Float], Error>, onAudio: @escaping @MainActor () -> Void
+    ) -> Speech {
+        let player = self.player
+        let task = Task {
+            var started = false
+            for try await samples in stream {
+                try Task.checkCancellation()
+                guard let buffer = AVAudioPCMBuffer(
+                    pcmFormat: Self.said, frameCapacity: AVAudioFrameCount(samples.count))
+                else { continue }
+                buffer.frameLength = AVAudioFrameCount(samples.count)
+                samples.withUnsafeBufferPointer {
+                    buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count)
                 }
-                status = .thinking
-                let reply = try await server.send(chatId: chatId, text: text)
-                guard turn == self.turn else { return }
-                try await speak(server.speech(reply), turn: turn)
-                guard turn == self.turn else { return }
-                status = .listening
-            } catch {
-                guard turn == self.turn, !(error is CancellationError) else { return }
-                self.error = error.localizedDescription
-                status = .listening
+                // Queued without waiting: the stream keeps arriving while this plays.
+                player.scheduleBuffer(buffer, completionHandler: nil)
+                if !started { onAudio() }
+                started = true
             }
+            try Task.checkCancellation()
+            // A last, silent buffer reports when everything before it has been played.
+            guard let end = AVAudioPCMBuffer(pcmFormat: Self.said, frameCapacity: 240) else { return }
+            end.frameLength = 240
+            _ = await player.scheduleBuffer(end, completionCallbackType: .dataPlayedBack)
         }
-    }
-
-    /// Speak plays the speech stream as it arrives and returns once the last of it is heard.
-    private func speak(_ speech: AsyncThrowingStream<[Float], Error>, turn: Int) async throws {
-        for try await samples in speech {
-            guard turn == self.turn else { return }
-            guard let buffer = AVAudioPCMBuffer(
-                pcmFormat: Self.said, frameCapacity: AVAudioFrameCount(samples.count))
-            else { continue }
-            buffer.frameLength = AVAudioFrameCount(samples.count)
-            samples.withUnsafeBufferPointer {
-                buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count)
-            }
-            // Queued without waiting: the stream keeps arriving while this plays.
-            player.scheduleBuffer(buffer, completionHandler: nil)
-            if status == .thinking { status = .speaking }
-        }
-        // A last, silent buffer reports when everything before it has been played.
-        guard let end = AVAudioPCMBuffer(pcmFormat: Self.said, frameCapacity: 240) else { return }
-        end.frameLength = 240
-        _ = await player.scheduleBuffer(end, completionCallbackType: .dataPlayedBack)
+        return Speech(
+            stop: {
+                task.cancel()
+                player.stop()
+                player.play()
+            },
+            done: { try await task.value })
     }
 
     /// Interrupted pauses voice mode for a call or Siri and resumes it afterwards.
     private func interrupted(began: Bool) {
         guard status != .off else { return }
         if began {
-            if status == .thinking || status == .speaking { interrupt() }
+            loop?.pause()
             status = .paused
             return
         }

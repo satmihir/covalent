@@ -6,6 +6,11 @@ public struct Server: Sendable {
     public struct Reply: Equatable, Sendable {
         public let chatId: String
         public let replyId: String
+
+        public init(chatId: String, replyId: String) {
+            self.chatId = chatId
+            self.replyId = replyId
+        }
     }
 
     /// Failure is a refused request, in the words Covalent gave.
@@ -88,6 +93,15 @@ public struct Server: Sendable {
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Pending reports whether a reply is still being written.
+    public func pending(_ reply: Reply) async throws -> Bool {
+        let body = try await json("GET", "api/chats/\(reply.chatId)")
+        let messages = body["messages"] as? [[String: Any]] ?? []
+        return messages.contains {
+            $0["id"] as? String == reply.replyId && $0["status"] as? String == "pending"
         }
     }
 

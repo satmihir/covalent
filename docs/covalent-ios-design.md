@@ -33,8 +33,8 @@ the simulator; it has not run anywhere yet. As built:
 - The Xcode project is hand-written in Xcode's folder-synchronized format, so
   files added under `ios/Covalent/` need no project edit. Bundle identifier
   `local.covalent.app`, iOS 17 and up, Swift 5 language mode.
-- Not ported yet: the page's retry when a reply restarts, and its loop tests.
-  Both come with step 15.
+- The page's retry when a reply restarts and its loop tests came later, with
+  step 15a.
 
 The check on the phone, with Covalent reachable over Tailscale:
 
@@ -46,9 +46,36 @@ The check on the phone, with Covalent reachable over Tailscale:
 4. Talk over a long answer; it stops, and the chat on the Mac shows the reply
    stopped.
 5. Note the iOS version, whether echo made it interrupt itself, and roughly how
-   long from the end of a question to the first word. This is a design, not a plan with settled steps: nothing here is
-built, and the parts marked "to verify" have not been tried on a device. When
-code exists and disagrees with this page, the code is right.
+   long from the end of a question to the first word.
+
+**Status, 2026-11-21:** the proof ran in the iPhone simulator, not yet on a
+phone. Found there:
+
+- iOS stops the audio engine when the audio configuration changes, and in the
+  simulator does so right after it starts. The app now starts it again.
+- With no echo cancellation between the Mac's speakers and microphone, the app
+  heard its own reply as the user talking, stopped it, and sent the clipped
+  words as the next message. Whether a phone's speaker does the same is for
+  the phone to show; a guard waits on that.
+
+Step 15 is built in four parts, each checked on the Mac or in the simulator,
+and the phone is tested once at the end:
+
+| Part | What | Checked by |
+|---|---|---|
+| 15a (built) | `VoiceLoop.swift`, the page's turn-taking rules with its ten scenarios; `VoiceSession` is now only the microphone, speaker and server | `swift test` |
+| 15b | The first-run screen and the chat in a web view | The simulator |
+| 15c | The bridge and the voice bar | Web tests and the simulator |
+| 15d | Speech streamed to `/api/listen` while spoken, as the page now does | `swift test`, then a spoken turn |
+
+As built in 15a: whether a reply is still being written is asked of the server
+(`GET /api/chats/{id}`), since the app has no event stream of its own, so the
+loop's `pending` is asynchronous where the page's is not. A failed send is
+reported like any other failure; the page reports its own.
+
+This is a design, not a plan with settled steps: the parts marked "to verify"
+have not been tried on a device. When code exists and disagrees with this
+page, the code is right.
 
 ## Goal
 
@@ -194,7 +221,7 @@ ONNX Runtime as the app's one dependency. See open point 2.
 ### Turn-taking
 
 `VoiceLoop.swift` is a port of `web/src/voiceLoop.ts`, with the same rules
-and the same nine test scenarios:
+and the same test scenarios:
 
 - An utterance starts a turn and replaces an unfinished one.
 - Talking over a reply stops the speech, and cancels the reply if it is still
