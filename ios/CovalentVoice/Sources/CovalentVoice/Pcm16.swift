@@ -1,5 +1,16 @@
 import Foundation
 
+/// Pcm16 encodes mono samples between -1 and 1 as 16-bit little-endian PCM.
+public func pcm16(_ samples: [Float]) -> Data {
+    var data = Data(capacity: samples.count * 2)
+    for sample in samples {
+        let clamped = max(-1, min(1, sample))
+        let value = Int16(clamped < 0 ? clamped * 32768 : clamped * 32767)
+        withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+    }
+    return data
+}
+
 /// Wav encodes mono samples between -1 and 1 as a 16-bit WAV file, the form Covalent's
 /// transcription route accepts, as the page's own `wav` does.
 public func wav(_ samples: [Float], rate: Int) -> Data {
@@ -20,11 +31,7 @@ public func wav(_ samples: [Float], rate: Int) -> Data {
     append(UInt16(16))
     data.append(contentsOf: Array("data".utf8))
     append(UInt32(bytes))
-    for sample in samples {
-        let clamped = max(-1, min(1, sample))
-        append(Int16(clamped < 0 ? clamped * 32768 : clamped * 32767))
-    }
-    return data
+    return data + pcm16(samples)
 }
 
 /// Pcm16Decoder turns Covalent's speech stream, 16-bit little-endian mono, into samples. A

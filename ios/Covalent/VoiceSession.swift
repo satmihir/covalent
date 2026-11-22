@@ -24,6 +24,7 @@ final class VoiceSession {
     private let player = AVAudioPlayerNode()
     private var detector = SpeechDetector(rate: 16000)
     private var loop: VoiceLoop?
+    private var listen: Listen?
     private var observers: [NSObjectProtocol] = []
     /// starts counts starts and stops, so a start overtaken by either gives up.
     private var starts = 0
@@ -55,9 +56,16 @@ final class VoiceSession {
                 return fail("Covalent's voice is off: start it with OPENAI_API_KEY set.")
             }
             try open()
+            let listen = Listen(url: server.listen)
+            self.listen = listen
             loop = VoiceLoop(
                 .init(
-                    transcribe: { try await server.transcribe(wav: wav($0, rate: 16000)) },
+                    transcribe: { audio in
+                        // The words streamed while speaking come sooner; a turn that could not
+                        // be streamed is sent whole.
+                        if let words = try? await listen.commit() { return words }
+                        return try await server.transcribe(wav: wav(audio, rate: 16000))
+                    },
                     send: { try await server.send(chatId: chatId, text: $0) },
                     speak: { [unowned self] in speak(server.speech($0), onAudio: $1) },
                     // A reply that can't be asked about is treated as finished.
@@ -89,6 +97,8 @@ final class VoiceSession {
         starts += 1
         loop?.close()
         loop = nil
+        listen?.close()
+        listen = nil
         player.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -110,6 +120,7 @@ final class VoiceSession {
     func toggleMute() {
         muted.toggle()
         // What was heard before the mute is not part of what is said after it.
+        listen?.discard()
         detector = SpeechDetector(rate: 16000)
         level = -100
     }
@@ -197,10 +208,14 @@ final class VoiceSession {
     private func hear(_ frame: [Float]) {
         guard status != .off, status != .paused, !muted, !frame.isEmpty else { return }
         level = SpeechDetector.level(frame)
+        // While a turn is being streamed, each frame goes to Covalent as it is heard. The frame
+        // that starts a turn goes with the rest of what the detector heard of it.
+        listen?.frame(frame)
         for event in detector.feed(frame) {
             switch event {
             case .started:
                 loop?.speechStarted()
+                listen?.start(detector.utterance)
             case .ended(let utterance):
                 Task { await loop?.heard(utterance) }
             }
@@ -258,6 +273,8 @@ final class VoiceSession {
         guard status != .off else { return }
         guard began else { return resume() }
         loop?.pause()
+        listen?.discard()
+        detector = SpeechDetector(rate: 16000)
         status = .paused
     }
 

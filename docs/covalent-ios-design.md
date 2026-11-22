@@ -66,7 +66,7 @@ and the phone is tested once at the end:
 | 15a (built) | `VoiceLoop.swift`, the page's turn-taking rules with its ten scenarios; `VoiceSession` is now only the microphone, speaker and server | `swift test` |
 | 15b (built) | The first-run screen and the chat in a web view | The simulator |
 | 15c (built) | The bridge and the voice bar | Web tests and the simulator |
-| 15d | Speech streamed to `/api/listen` while spoken, as the page now does | `swift test`, then a spoken turn |
+| 15d (built) | Speech streamed to `/api/listen` while spoken, as the page now does | `swift test`, then a spoken turn |
 
 As built in 15a: whether a reply is still being written is asked of the server
 (`GET /api/chats/{id}`), since the app has no event stream of its own, so the
@@ -111,6 +111,18 @@ As built in 15c:
   reloads without knowing voice mode is on: the conversation carries on and
   the bar stays, but the message box shows behind it until voice mode ends.
 - Not tried: a spoken turn through the bridge, and anything on a phone.
+
+As built in 15d:
+
+- `Listen.swift` is a port of `web/src/listen.ts` over a `URLSession`
+  WebSocket, tested against a WebSocket listener on a loopback port. The
+  detector hands over what it heard of a turn when the turn starts, so
+  `Listen` keeps no audio of its own.
+- A turn's words come from the stream; when the stream fails, or the words
+  take more than 5 s, the whole recording is sent as before.
+- Checked against a running Covalent with a sentence synthesized to a file and
+  fed through the detector in real time: the streamed words came 0.54 s after
+  the pause, the whole recording's after 2.23 s. Not tried with a voice.
 
 This is a design, not a plan with settled steps: the parts marked "to verify"
 have not been tried on a device. When code exists and disagrees with this

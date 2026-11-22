@@ -111,6 +111,13 @@ public struct Server: Sendable {
         }
     }
 
+    /// listen is the WebSocket address that takes voice mode's speech while it is spoken.
+    public var listen: URL {
+        var parts = URLComponents(url: base.appending(path: "api/listen"), resolvingAgainstBaseURL: false)!
+        parts.scheme = base.scheme == "http" ? "ws" : "wss"
+        return parts.url!
+    }
+
     /// Cancel stops the chat's reply that is still being written.
     public func cancel(chatId: String) async throws {
         _ = try await json("POST", "api/chats/\(chatId)/cancel")

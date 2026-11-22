@@ -31,7 +31,9 @@ public struct SpeechDetector {
     private var quiet = 0.0
     /// recent keeps the moment before speech is confirmed, so its first syllable is not lost.
     private var recent: [Float] = []
-    private var utterance: [Float] = []
+    /// utterance is what has been heard of the utterance being spoken, from just before it
+    /// started; empty between utterances.
+    public private(set) var utterance: [Float] = []
 
     public init(rate: Double) {
         self.rate = rate

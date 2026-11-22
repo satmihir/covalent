@@ -19,6 +19,9 @@ private func run(_ detector: inout SpeechDetector, _ frames: [[Float]]) -> [Spee
     #expect(run(&detector, frames(20, decibels: -60)).isEmpty)
     let started = run(&detector, frames(4, decibels: -60) + frames(6, decibels: -20))
     #expect(started == [.started])
+    // What was heard so far is there to be streamed: the half second kept up to the frame
+    // that confirmed the speech, and the one frame since.
+    #expect(detector.utterance.count == Int(16000 * 0.55))
     // A short breath does not end it; 800 ms of quiet does.
     #expect(run(&detector, frames(6, decibels: -60) + frames(4, decibels: -20)).isEmpty)
     let ended = run(&detector, frames(16, decibels: -60))
