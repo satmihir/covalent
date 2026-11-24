@@ -921,7 +921,9 @@ mod tests {
             .map(|m| m["id"].as_str().unwrap())
             .collect();
         assert!(
-            ids.contains(&"gpt-6-luna") && ids.contains(&"gpt-6.1-sol"),
+            ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol"]
+                .iter()
+                .all(|id| ids.contains(id)),
             "{models}"
         );
         assert!(!ids.iter().any(|id| id.starts_with("claude-")), "{models}");
