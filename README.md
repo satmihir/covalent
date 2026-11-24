@@ -211,11 +211,20 @@ before chats had folders stay in `images/` in the data folder.
 ## Models and archiving
 
 The model picker offers the catalog models whose provider has credentials
-here. A new chat uses the model picked before its first message, or GPT-6 Sol
-when none was: it starts answering seconds sooner than 6.1 Sol, which voice
-mode feels most. The page remembers the last model you picked; switching an
-existing chat carries its history over to the new model. A ChatGPT plan does
-not serve every catalog model; a model it refuses fails on the first reply.
+here, as a grid: a tab for each provider, a row for each model family and a
+column for each reasoning effort, so one press picks a model and how hard it
+thinks. A family with several versions shows its newest; pressing the version
+steps to the older ones. The heavier ring marks the effort a model runs at
+unless you choose another, and a model that takes no effort setting has one
+"standard" cell.
+
+A new chat uses the model and effort picked before its first message, or
+GPT-6 Sol when none was: it starts answering seconds sooner than 6.1 Sol,
+which voice mode feels most. The page remembers your last pick; switching an
+existing chat carries its history over to the new model, and the request after
+any change of model or effort is billed without the prompt cache. A ChatGPT
+plan does not serve every catalog model; a model it refuses fails on the first
+reply.
 
 Archiving a chat removes it from Covalent and releases its Session, so it can
 be continued in a terminal with `reagent --resume ID` (shown when you archive).
