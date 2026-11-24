@@ -955,7 +955,7 @@ mod tests {
         for refused in [
             json!({"model": "no-such-model"}),
             json!({"model": "gpt-6.1-sol", "effort": "none"}),
-            json!({"model": "gpt-6.1-terra", "effort": "high"}),
+            json!({"model": "gpt-6.1-terra", "effort": ""}),
         ] {
             let (status, body) = call(&app, "POST", "/api/chats", refused).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
