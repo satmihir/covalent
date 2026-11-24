@@ -21,6 +21,7 @@ import { nativeApp, VOICE_ENDED } from "./nativeApp";
 import { touched } from "./fileView";
 import { FolderIcon, MenuIcon, NewChatIcon } from "./icons";
 import { ModelPicker } from "./ModelPicker";
+import type { Choice } from "./modelGrid";
 import { Personalization } from "./Personalization";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./Thread";
@@ -28,19 +29,22 @@ import { Thread } from "./Thread";
 type Notice = { text: string; tone: "error" | "info" };
 
 const MODEL_KEY = "covalent.model";
+const EFFORT_KEY = "covalent.effort";
 
-/** Remembered reads this viewer's last model choice for new chats; storage may be unavailable. */
-function remembered(): string | null {
+/** Remembered reads this viewer's last model and effort for new chats; storage may be unavailable. */
+function remembered(): Choice | null {
   try {
-    return localStorage.getItem(MODEL_KEY);
+    const model = localStorage.getItem(MODEL_KEY);
+    return model ? { model, effort: localStorage.getItem(EFFORT_KEY) } : null;
   } catch {
     return null;
   }
 }
 
-function remember(model: string) {
+function remember(choice: Choice) {
   try {
-    localStorage.setItem(MODEL_KEY, model);
+    localStorage.setItem(MODEL_KEY, choice.model);
+    localStorage.setItem(EFFORT_KEY, choice.effort ?? "");
   } catch {
     // Remembering the choice is a convenience only.
   }
@@ -88,8 +92,8 @@ export function App() {
   // openChat is the open chat as last read, including an archived one the sidebar omits.
   const [openChat, setOpenChat] = useState<Chat | null>(null);
   const [models, setModels] = useState<Model[]>([]);
-  const [defaultModel, setDefaultModel] = useState<string | null>(null);
-  const [newModel, setNewModel] = useState<string | null>(remembered);
+  const [defaultChoice, setDefaultChoice] = useState<Choice | null>(null);
+  const [newChoice, setNewChoice] = useState<Choice | null>(remembered);
   const current = useRef(chatId);
   // Previews change many times a second; the ref is applied at once and shown once per frame.
   const previewRef = useRef<Record<string, Preview>>({});
@@ -194,11 +198,17 @@ export function App() {
 
   useEffect(() => {
     api.chats().then(setChats, (error) => setNotice({ text: describe(error), tone: "error" }));
-    api.models().then(({ models, default: fallback }) => {
+    api.models().then(({ models, default: fallback, default_effort }) => {
       setModels(models);
-      setDefaultModel(fallback);
-      // A remembered model this server no longer offers falls back to the default.
-      setNewModel((chosen) => (chosen && models.some((m) => m.id === chosen) ? chosen : null));
+      setDefaultChoice(fallback ? { model: fallback, effort: default_effort } : null);
+      // A remembered model this server no longer offers falls back to the default, and a
+      // remembered effort the model does not take to the model's own.
+      setNewChoice((chosen) => {
+        const model = models.find((m) => m.id === chosen?.model);
+        if (!chosen || !model) return null;
+        const kept = chosen.effort !== null && model.efforts.includes(chosen.effort);
+        return { model: model.id, effort: kept ? chosen.effort : model.effort };
+      });
     }, () => {});
     api.voice().then(setVoice, () => {});
     open(idFromPath(), false);
@@ -280,7 +290,7 @@ export function App() {
   /** OpenedChat returns the open chat's ID, creating the chat when a new one is showing. */
   const openedChat = async (): Promise<string> => {
     if (current.current) return current.current;
-    const chat = await api.create(newModel);
+    const chat = await api.create(newChoice?.model ?? null, newChoice?.effort ?? null);
     setOpenChat(chat);
     setChats((list) => [chat, ...list]);
     current.current = chat.id;
@@ -356,15 +366,16 @@ export function App() {
     setVoiceMode(true);
   };
 
-  const chooseModel = async (model: string) => {
+  const chooseModel = async (model: string, effort: string) => {
+    const choice = { model, effort };
     if (!chatId) {
-      setNewModel(model);
-      remember(model);
+      setNewChoice(choice);
+      remember(choice);
       return;
     }
     try {
-      const chat = await api.switchModel(chatId, model);
-      remember(model);
+      const chat = await api.switchModel(chatId, model, effort);
+      remember(choice);
       if (current.current === chatId) setOpenChat(chat);
       setChats((list) => list.map((c) => (c.id === chat.id ? chat : c)));
     } catch (error) {
@@ -426,7 +437,8 @@ export function App() {
   const title = chats.find((c) => c.id === chatId)?.title ?? openChat?.title;
   const empty = !chatId && messages.length === 0;
   const archived = openChat?.archived_at_ms != null;
-  const model = chatId ? (openChat?.model ?? null) : (newModel ?? defaultModel);
+  const opened = openChat?.model ? { model: openChat.model, effort: openChat.effort } : null;
+  const choice: Choice | null = chatId ? opened : (newChoice ?? defaultChoice);
   const folder = chatId && openChat?.workspace ? chatId : null;
   // A new chat will have a folder; an older one without a folder takes no files.
   const takesFiles = !archived && !voiceMode && (!chatId || !!openChat?.workspace);
@@ -474,9 +486,9 @@ export function App() {
           </button>
           <ModelPicker
             models={models}
-            value={model}
+            value={choice}
             disabled={running || archived || (chatId !== null && !openChat)}
-            onChange={(m) => void chooseModel(m)}
+            onChange={(model, effort) => void chooseModel(model, effort)}
           />
           <span className="topbar-title">{chatId ? (title ?? "New chat") : ""}</span>
           {folder && (

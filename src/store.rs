@@ -15,6 +15,9 @@ pub struct Chat {
     pub updated_at_ms: i64,
     /// model is the Session's model as last opened or switched here; unknown for older chats.
     pub model: Option<String>,
+    /// effort is the Session's reasoning effort as last opened or set here: empty where the
+    /// model takes none, unknown for older chats.
+    pub effort: Option<String>,
     /// archived_at_ms hides the chat from Covalent; its Session stays resumable from the CLI.
     pub archived_at_ms: Option<i64>,
     /// workspace names the chat's folder under `workspaces/`; chats made before folders have none.
@@ -92,6 +95,7 @@ impl Store {
             ("messages", "activity", "TEXT"),
             ("messages", "attachments", "TEXT"),
             ("chats", "personalization", "TEXT"),
+            ("chats", "effort", "TEXT"),
         ] {
             let columns: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
@@ -133,13 +137,14 @@ impl Store {
         &self,
         id: &str,
         model: &str,
+        effort: &str,
         workspace: Option<&str>,
         now_ms: i64,
     ) -> rusqlite::Result<Chat> {
         self.conn.execute(
-            "INSERT INTO chats (id, model, workspace, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![id, model, workspace, now_ms],
+            "INSERT INTO chats (id, model, effort, workspace, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, model, effort, workspace, now_ms],
         )?;
         Ok(Chat {
             id: id.into(),
@@ -147,16 +152,17 @@ impl Store {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             model: Some(model.into()),
+            effort: Some(effort.into()),
             archived_at_ms: None,
             workspace: workspace.map(str::to_owned),
         })
     }
 
-    /// Set_model records the model a chat's Session switched to.
-    pub fn set_model(&self, chat_id: &str, model: &str) -> rusqlite::Result<()> {
+    /// Set_model records the model and reasoning effort a chat's Session now runs at.
+    pub fn set_model(&self, chat_id: &str, model: &str, effort: &str) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE chats SET model = ?2 WHERE id = ?1",
-            params![chat_id, model],
+            "UPDATE chats SET model = ?2, effort = ?3 WHERE id = ?1",
+            params![chat_id, model, effort],
         )?;
         Ok(())
     }
@@ -313,6 +319,7 @@ fn chat(row: &Row) -> rusqlite::Result<Chat> {
         created_at_ms: row.get("created_at_ms")?,
         updated_at_ms: row.get("updated_at_ms")?,
         model: row.get("model")?,
+        effort: row.get("effort")?,
         archived_at_ms: row.get("archived_at_ms")?,
         workspace: row.get("workspace")?,
     })
@@ -373,7 +380,7 @@ mod tests {
         let path = dir.path().join("covalent.db");
         {
             let store = Store::open(&path).unwrap();
-            store.create_chat("c", "m", None, 1).unwrap();
+            store.create_chat("c", "m", "", None, 1).unwrap();
             store.insert_message(&reply("pending", "pending")).unwrap();
             store.insert_message(&reply("done", "complete")).unwrap();
         }
@@ -397,8 +404,8 @@ mod tests {
     fn chats_are_listed_by_latest_activity() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("covalent.db")).unwrap();
-        store.create_chat("older", "m", None, 1).unwrap();
-        store.create_chat("newer", "m", None, 2).unwrap();
+        store.create_chat("older", "m", "", None, 1).unwrap();
+        store.create_chat("newer", "m", "", None, 2).unwrap();
         let mut m = reply("m", "complete");
         m.chat_id = "older".into();
         m.created_at_ms = 3;
@@ -426,7 +433,7 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             assert_eq!(store.personalization().unwrap(), Personalization::default());
-            store.create_chat("c", "m", None, 1).unwrap();
+            store.create_chat("c", "m", "", None, 1).unwrap();
             assert_eq!(store.personalization_sent("c").unwrap(), None);
             store.set_personalization(&set).unwrap();
             store.set_personalization_sent("c", Some("note")).unwrap();
@@ -453,7 +460,10 @@ mod tests {
             .unwrap();
         let store = Store::open(&path).unwrap();
         let old = store.chat("old").unwrap().unwrap();
-        assert_eq!((old.model, old.archived_at_ms), (None, None));
+        assert_eq!(
+            (old.model, old.effort, old.archived_at_ms),
+            (None, None, None)
+        );
         drop(store);
         Store::open(&path).unwrap();
     }

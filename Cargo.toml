@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reagent = { git = "https://github.com/satmihir/re-agent", rev = "643b1da89a0299806faadb0a5ef54e8587de7925" }
+reagent = { git = "https://github.com/satmihir/re-agent", rev = "4fcb5e63711a8cd21f2a19b534351e70546a2053" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

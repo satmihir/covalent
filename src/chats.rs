@@ -4,8 +4,8 @@ use crate::personalization::{Personalization, CLEARED, MESSAGE};
 use crate::store::{Chat, Image, Message, Store};
 use reagent::session_api::{
     self, ApiError, CommandState, EntryCursor, EventCursor, EventKind, HistoryMode, PlanMode,
-    PreviewCursor, PreviewPage, RunKind, RunRef, RunState, SessionApi, SessionChange,
-    SessionOptions, SessionSnapshot,
+    PreviewCursor, PreviewPage, ReasoningEffort, RunKind, RunRef, RunState, SessionApi,
+    SessionChange, SessionOptions, SessionSnapshot,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -77,10 +77,15 @@ impl Launch {
     }
 
     /// Chat_options returns the settings of a chat's Session, which works with files in
-    /// `workspace` and runs no commands. A model chosen in the picker runs at its own default effort.
-    pub fn chat_options(&self, chosen: Option<&str>, workspace: PathBuf) -> SessionOptions {
+    /// `workspace` and runs no commands. A model chosen in the picker runs at the effort chosen
+    /// with it, or at its own default effort.
+    pub fn chat_options(
+        &self,
+        chosen: Option<(&str, Option<&str>)>,
+        workspace: PathBuf,
+    ) -> SessionOptions {
         let (model, effort) = match chosen {
-            Some(model) => (Some(model.to_owned()), None),
+            Some((model, effort)) => (Some(model.to_owned()), effort.map(str::to_owned)),
             None => (self.model.clone(), self.effort.clone()),
         };
         let instructions = if self.images {
@@ -154,6 +159,13 @@ pub enum Event {
 pub struct Model {
     pub id: String,
     pub provider: String,
+    /// family and version name the model as the picker shows it: Sol 6.2.
+    pub family: String,
+    pub version: String,
+    /// efforts are the reasoning efforts the model accepts, lowest first; empty if it takes none.
+    pub efforts: Vec<String>,
+    /// effort is the one the model runs at unless another is chosen.
+    pub effort: String,
     pub note: String,
 }
 
@@ -293,34 +305,56 @@ impl Chats {
         })
     }
 
-    /// Models lists the catalog models whose provider has credentials here, and the default.
-    /// Checking is local: re:agent reads environment keys and its login file, nothing remote.
-    pub fn models(&self) -> (Vec<Model>, Option<String>) {
+    /// Models lists the catalog models whose provider has credentials here, and the model and
+    /// effort of a new chat when none is picked. Checking is local: re:agent reads environment
+    /// keys and its login file, nothing remote.
+    pub fn models(&self) -> (Vec<Model>, Option<(String, String)>) {
         let usable = |model: &str| {
             let mut config = serde_json::json!({ "model": model });
             reagent::provider::configure(&mut config)
                 .ok()
                 .map(|_| config["model"].as_str().unwrap_or("").to_owned())
         };
+        let text =
+            |entry: &serde_json::Value, key: &str| entry[key].as_str().unwrap_or("").to_owned();
         let models = reagent::catalog::models()
             .as_array()
             .into_iter()
             .flatten()
             .filter(|entry| usable(entry["id"].as_str().unwrap_or("")).is_some())
             .map(|entry| Model {
-                id: entry["id"].as_str().unwrap_or("").into(),
-                provider: entry["provider"].as_str().unwrap_or("").into(),
-                note: entry["note"].as_str().unwrap_or("").into(),
+                id: text(entry, "id"),
+                provider: text(entry, "provider"),
+                family: text(entry, "family"),
+                version: text(entry, "version"),
+                efforts: entry["efforts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|effort| effort.as_str().map(str::to_owned))
+                    .collect(),
+                effort: text(entry, "effort"),
+                note: text(entry, "note"),
             })
             .collect();
-        (models, usable(self.launch.model.as_deref().unwrap_or("")))
+        let default = usable(self.launch.model.as_deref().unwrap_or("")).map(|model| {
+            let effort = self
+                .launch
+                .effort
+                .clone()
+                .unwrap_or_else(|| text(&reagent::catalog::model_info(&model), "effort"));
+            (model, effort)
+        });
+        (models, default)
     }
 
-    /// Create opens a new Session, on a chosen catalog model if given, and records an untitled chat.
-    pub fn create(&self, model: Option<&str>) -> Result<Chat, Failure> {
+    /// Create opens a new Session and records an untitled chat. A chosen catalog model runs at
+    /// the effort chosen with it, or at its own default.
+    pub fn create(&self, model: Option<&str>, effort: Option<&str>) -> Result<Chat, Failure> {
         if let Some(model) = model {
-            known(model)?;
+            offered(model, effort)?;
         }
+        let chosen = model.map(|model| (model, effort));
         // The folder is named before the Session, whose ID names the chat, can exist.
         let folder = reagent::types::new_id();
         let workspace = self.launch.data.join("workspaces").join(&folder);
@@ -328,7 +362,7 @@ impl Chats {
             Failure::new(500, "workspace", format!("create the chat's folder: {e}"))
         })?;
         let api =
-            match session_api::open_session(self.launch.chat_options(model, workspace.clone())) {
+            match session_api::open_session(self.launch.chat_options(chosen, workspace.clone())) {
                 Ok(api) => api,
                 Err(error) => {
                     let _ = std::fs::remove_dir(&workspace);
@@ -340,6 +374,7 @@ impl Chats {
         let chat = self.store.lock().unwrap().create_chat(
             &id,
             &snapshot.model,
+            &snapshot.reasoning_effort,
             Some(&folder),
             now_ms(),
         )?;
@@ -347,31 +382,39 @@ impl Chats {
         Ok(chat)
     }
 
-    /// Switch_model moves an idle chat to another catalog model, carrying its history over.
-    pub fn switch_model(&self, chat_id: &str, model: &str) -> Result<Chat, Failure> {
-        known(model)?;
+    /// Switch_model moves an idle chat to a catalog model, carrying its history over, and to
+    /// a reasoning effort if one is given. A switch alone lands on the model's default effort.
+    pub fn switch_model(
+        &self,
+        chat_id: &str,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<Chat, Failure> {
+        offered(model, effort)?;
         let (chat, _) = self.get(chat_id)?;
         if chat.archived_at_ms.is_some() {
             return Err(archived());
         }
         let api = self.session(chat_id)?;
-        let snapshot = api.get_snapshot()?;
-        if snapshot.model != model {
-            let request = reagent::types::new_id();
-            let change = SessionChange::SwitchModel {
+        if api.get_snapshot()?.model != model {
+            let switch = SessionChange::SwitchModel {
                 model: model.into(),
                 history: HistoryMode::Carry,
             };
-            api.change_session(&request, snapshot.revision, change)?;
-            let command = api.wait_command(&request)?;
-            if command.state != CommandState::Applied {
-                let reason = command
-                    .reason
-                    .unwrap_or_else(|| "the switch did not apply".into());
-                return Err(Failure::new(409, "not_applied", reason));
+            apply(&api, switch)?;
+        }
+        if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
+            if api.get_snapshot()?.reasoning_effort != effort {
+                let effort = ReasoningEffort::Named(effort.into());
+                apply(&api, SessionChange::SetEffort { effort })?;
             }
         }
-        self.store.lock().unwrap().set_model(chat_id, model)?;
+        let snapshot = api.get_snapshot()?;
+        self.store.lock().unwrap().set_model(
+            chat_id,
+            &snapshot.model,
+            &snapshot.reasoning_effort,
+        )?;
         Ok(self.get(chat_id)?.0)
     }
 
@@ -922,14 +965,39 @@ fn archived() -> Failure {
     )
 }
 
-/// Known accepts only catalog models, since re:agent takes any name and fails later.
-fn known(model: &str) -> Result<(), Failure> {
-    if reagent::catalog::model_info(model).is_null() {
-        return Err(Failure::new(
-            400,
-            "invalid_argument",
-            format!("{model} is not an offered model"),
-        ));
+/// Offered accepts only catalog models, and only an effort the model lists, since re:agent
+/// takes any name at open and fails later. The empty effort is for a model that lists none.
+fn offered(model: &str, effort: Option<&str>) -> Result<(), Failure> {
+    let invalid = |message: String| Err(Failure::new(400, "invalid_argument", message));
+    let info = reagent::catalog::model_info(model);
+    if info.is_null() {
+        return invalid(format!("{model} is not an offered model"));
+    }
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    let efforts = info["efforts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let listed = if efforts.is_empty() {
+        effort.is_empty()
+    } else {
+        efforts.iter().any(|e| e == effort)
+    };
+    if !listed {
+        return invalid(format!("{model} does not offer the effort {effort:?}"));
+    }
+    Ok(())
+}
+
+/// Apply makes one change to an idle Session and waits until it has taken effect.
+fn apply(api: &SessionApi, change: SessionChange) -> Result<(), Failure> {
+    let request = reagent::types::new_id();
+    api.change_session(&request, api.get_snapshot()?.revision, change)?;
+    let command = api.wait_command(&request)?;
+    if command.state != CommandState::Applied {
+        let reason = command
+            .reason
+            .unwrap_or_else(|| "the change did not apply".into());
+        return Err(Failure::new(409, "not_applied", reason));
     }
     Ok(())
 }

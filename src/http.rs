@@ -159,7 +159,8 @@ async fn list(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
 async fn models(State(chats): State<Arc<Chats>>) -> impl IntoResponse {
     blocking(move || {
         let (models, default) = chats.models();
-        Ok(json!({"models": models, "default": default}))
+        let (model, effort) = default.unzip();
+        Ok(json!({"models": models, "default": model, "default_effort": effort}))
     })
     .await
 }
@@ -176,10 +177,11 @@ async fn set_personalization(
     blocking(move || Ok(json!({"personalization": chats.set_personalization(&body)?}))).await
 }
 
-/// Create takes an optional `{"model": id}`; without one the chat uses Covalent's default.
+/// Create takes an optional `{"model": id, "effort": name}`; without a model the chat uses
+/// Covalent's default, and without an effort the model's own.
 async fn create(State(chats): State<Arc<Chats>>, Json(body): Json<Value>) -> impl IntoResponse {
     blocking(move || {
-        let chat = chats.create(body["model"].as_str())?;
+        let chat = chats.create(body["model"].as_str(), body["effort"].as_str())?;
         Ok(json!({ "chat": chat }))
     })
     .await
@@ -188,6 +190,8 @@ async fn create(State(chats): State<Arc<Chats>>, Json(body): Json<Value>) -> imp
 #[derive(Deserialize)]
 struct ModelBody {
     model: String,
+    /// effort left out means the model's default after a switch, and no change otherwise.
+    effort: Option<String>,
 }
 
 async fn switch_model(
@@ -195,7 +199,11 @@ async fn switch_model(
     Path(id): Path<String>,
     Json(body): Json<ModelBody>,
 ) -> impl IntoResponse {
-    blocking(move || Ok(json!({"chat": chats.switch_model(&id, &body.model)?}))).await
+    blocking(move || {
+        let chat = chats.switch_model(&id, &body.model, body.effort.as_deref())?;
+        Ok(json!({ "chat": chat }))
+    })
+    .await
 }
 
 async fn archive(State(chats): State<Arc<Chats>>, Path(id): Path<String>) -> impl IntoResponse {
@@ -928,29 +936,53 @@ mod tests {
         );
         assert!(!ids.iter().any(|id| id.starts_with("claude-")), "{models}");
         assert_eq!(models["default"], "gpt-6.1-sol");
+        assert_eq!(models["default_effort"], "high");
+        let newest = models["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "gpt-6.2-sol")
+            .unwrap();
+        assert_eq!(
+            (&newest["family"], &newest["version"], &newest["effort"]),
+            (&json!("Sol"), &json!("6.2"), &json!("high"))
+        );
+        assert_eq!(
+            newest["efforts"],
+            json!(["low", "medium", "high", "xhigh", "max"])
+        );
 
-        let (status, body) = call(
-            &app,
-            "POST",
-            "/api/chats",
+        for refused in [
             json!({"model": "no-such-model"}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        let (_, created) = call(&app, "POST", "/api/chats", json!({"model": "gpt-6-luna"})).await;
+            json!({"model": "gpt-6.1-sol", "effort": "none"}),
+            json!({"model": "gpt-6.1-terra", "effort": "high"}),
+        ] {
+            let (status, body) = call(&app, "POST", "/api/chats", refused).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+        let chosen = json!({"model": "gpt-6-luna", "effort": "max"});
+        let (_, created) = call(&app, "POST", "/api/chats", chosen).await;
         assert_eq!(created["chat"]["model"], "gpt-6-luna");
+        assert_eq!(created["chat"]["effort"], "max");
         let id = created["chat"]["id"].as_str().unwrap().to_owned();
-        let (status, switched) = call(
-            &app,
-            "POST",
-            &format!("/api/chats/{id}/model"),
-            json!({"model": "gpt-6.1-sol"}),
-        )
-        .await;
+        let path = format!("/api/chats/{id}/model");
+        let (status, switched) = call(&app, "POST", &path, json!({"model": "gpt-6.1-sol"})).await;
         assert_eq!(status, StatusCode::OK, "{switched}");
         assert_eq!(switched["chat"]["model"], "gpt-6.1-sol");
+        assert_eq!(switched["chat"]["effort"], "high");
+        let deeper = json!({"model": "gpt-6.1-sol", "effort": "xhigh"});
+        let (status, switched) = call(&app, "POST", &path, deeper).await;
+        assert_eq!(status, StatusCode::OK, "{switched}");
+        assert_eq!(switched["chat"]["effort"], "xhigh");
+        let both = json!({"model": "gpt-6.2-sol", "effort": "low"});
+        let (status, switched) = call(&app, "POST", &path, both).await;
+        assert_eq!(status, StatusCode::OK, "{switched}");
+        let unlisted = json!({"model": "gpt-6.2-sol", "effort": "none"});
+        let (status, body) = call(&app, "POST", &path, unlisted).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         let (_, body) = call(&app, "GET", &format!("/api/chats/{id}"), Value::Null).await;
-        assert_eq!(body["chat"]["model"], "gpt-6.1-sol");
+        assert_eq!(body["chat"]["model"], "gpt-6.2-sol");
+        assert_eq!(body["chat"]["effort"], "low");
     }
 
     /// Openai_fake serves the two OpenAI routes voice uses, on a loopback port. Its "audio" is
@@ -1102,7 +1134,9 @@ mod tests {
     fn stored(dir: &std::path::Path, text: &str, status: &str, voice: Option<Voice>) -> Router {
         use crate::store::Message;
         let store = Store::open(&dir.join("covalent.db")).unwrap();
-        store.create_chat("chat1", "gpt-6.1-sol", None, 1).unwrap();
+        store
+            .create_chat("chat1", "gpt-6.1-sol", "", None, 1)
+            .unwrap();
         for (id, role, text, status) in [
             ("ask", "user", "Tell me.", "complete"),
             ("reply", "assistant", text, status),
@@ -1794,7 +1828,9 @@ mod tests {
             std::fs::write(images.join(name), name).unwrap();
         }
         let store = Store::open(&dir.path().join("covalent.db")).unwrap();
-        store.create_chat("old", "gpt-6.1-sol", None, 1).unwrap();
+        store
+            .create_chat("old", "gpt-6.1-sol", "", None, 1)
+            .unwrap();
         let mut reply = Message {
             id: "reply".into(),
             chat_id: "old".into(),

@@ -5,12 +5,24 @@ export type Chat = {
   updated_at_ms: number;
   /** model is null for chats created before Covalent recorded it. */
   model: string | null;
+  /** effort is empty where the model takes none, and null where Covalent never recorded it. */
+  effort: string | null;
   archived_at_ms: number | null;
   /** workspace names the chat's folder; chats made before folders have none. */
   workspace: string | null;
 };
 
-export type Model = { id: string; provider: string; note: string };
+/** Model is one offered model: Sol 6.2 is a family and a version. Its efforts are the
+ *  reasoning efforts it accepts, lowest first, and effort the one it runs at unless chosen. */
+export type Model = {
+  id: string;
+  provider: string;
+  family: string;
+  version: string;
+  efforts: string[];
+  effort: string;
+  note: string;
+};
 
 /** Personalization is what the user tells every chat about themselves. */
 export type Personalization = {
@@ -122,7 +134,9 @@ export const api = {
   chats: () => request<{ chats: Chat[] }>("GET", "/api/chats").then((d) => d.chats),
   chat: (id: string) =>
     request<{ chat: Chat; messages: Message[]; previews: Record<string, Preview> }>("GET", `/api/chats/${id}`),
-  models: () => request<{ models: Model[]; default: string | null }>("GET", "/api/models"),
+  /** models lists what the picker offers, and the model and effort of a chat nobody picked for. */
+  models: () =>
+    request<{ models: Model[]; default: string | null; default_effort: string | null }>("GET", "/api/models"),
   personalization: () =>
     request<{ personalization: Personalization }>("GET", "/api/personalization").then((d) => d.personalization),
   /** personalize saves every field and returns them as stored, trimmed. */
@@ -130,10 +144,10 @@ export const api = {
     request<{ personalization: Personalization }>("PUT", "/api/personalization", fields).then(
       (d) => d.personalization,
     ),
-  create: (model: string | null) =>
-    request<{ chat: Chat }>("POST", "/api/chats", { model }).then((d) => d.chat),
-  switchModel: (id: string, model: string) =>
-    request<{ chat: Chat }>("POST", `/api/chats/${id}/model`, { model }).then((d) => d.chat),
+  create: (model: string | null, effort: string | null) =>
+    request<{ chat: Chat }>("POST", "/api/chats", { model, effort }).then((d) => d.chat),
+  switchModel: (id: string, model: string, effort: string) =>
+    request<{ chat: Chat }>("POST", `/api/chats/${id}/model`, { model, effort }).then((d) => d.chat),
   archive: (id: string) => request<object>("POST", `/api/chats/${id}/archive`),
   /** send posts a message, naming files already uploaded; a spoken one asks for a reply meant
    *  to be heard. */

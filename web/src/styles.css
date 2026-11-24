@@ -1494,10 +1494,8 @@ button {
   top: calc(100% + 6px);
   left: 0;
   z-index: 30;
-  min-width: 280px;
-  margin: 0;
-  padding: 6px;
-  list-style: none;
+  width: max-content;
+  padding: 8px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface);
@@ -1505,33 +1503,127 @@ button {
 }
 
 .picker-menu button {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 8px 10px;
   border: 0;
   border-radius: 8px;
   background: transparent;
-  text-align: left;
 }
 
 .picker-menu button:hover {
   background: var(--hover);
 }
 
-.picker-text {
+.picker-tabs {
   display: flex;
-  flex: 1;
-  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
 }
 
-.picker-id {
-  font-size: 14px;
+.picker-tabs button {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.picker-tabs button[aria-selected="true"] {
+  background: var(--active);
+  color: var(--text);
   font-weight: 500;
 }
 
-.picker-note {
+/* Rows are model families and columns reasoning efforts; the component sets the columns. */
+
+.picker-grid {
+  display: grid;
+  align-items: center;
+}
+
+.picker-effort {
+  padding: 4px 0 2px;
+  font-size: 11px;
+  color: var(--faint);
+  text-align: center;
+}
+
+.picker-family {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 4px;
+  font-size: 14px;
+}
+
+.picker-family.chosen {
+  font-weight: 600;
+}
+
+.picker-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.picker-menu button.picker-version {
+  padding: 2px 4px 2px 6px;
+  border: 1px solid var(--border);
+}
+
+.picker-version svg {
+  width: 11px;
+  height: 11px;
+}
+
+.picker-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0;
+}
+
+/* A cell is a dot: heavier at the effort the model runs at unless chosen, filled when chosen. */
+
+.picker-cell span {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--faint);
+  border-radius: 50%;
+}
+
+.picker-cell.usual span {
+  border: 2px solid var(--text);
+}
+
+.picker-cell[aria-pressed="true"] span {
+  width: 22px;
+  height: 22px;
+  border-color: var(--button);
+  background: var(--button);
+}
+
+.picker-menu button.picker-standard {
+  grid-column: 2 / -1;
+  height: 28px;
+  border: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.picker-menu button.picker-standard[aria-pressed="true"] {
+  border: 1px solid var(--button);
+  background: var(--button);
+  color: var(--button-text);
+}
+
+.picker-foot {
+  margin: 6px 0 0;
+  padding: 8px 4px 2px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--muted);
 }
@@ -1590,6 +1682,22 @@ button {
 
   .mobile-only {
     display: inline-flex;
+  }
+
+  /* The model grid hangs from the top bar, not its button, so it cannot run off the screen. */
+
+  .topbar {
+    position: relative;
+  }
+
+  .picker {
+    position: static;
+  }
+
+  .picker-menu {
+    left: 8px;
+    width: calc(100% - 16px);
+    max-width: 400px;
   }
 
   .main.empty .topbar {
