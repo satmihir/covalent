@@ -12,7 +12,15 @@ final class VoiceSession {
         case off, starting, listening, transcribing, thinking, speaking, paused
     }
 
-    private(set) var status = Status.off
+    private(set) var status = Status.off {
+        didSet {
+            // A reply's echo can be as loud in the microphone as the user, so loudness cannot
+            // tell them apart. While a reply plays the microphone is muted, and iOS, which
+            // cancels the echo, says when the user speaks over it.
+            guard (status == .speaking) != (oldValue == .speaking) else { return }
+            engine.inputNode.isVoiceProcessingInputMuted = status == .speaking
+        }
+    }
     /// error is what went wrong in the last turn. The next turn clears it.
     private(set) var error: String?
     /// level is the microphone's loudness in decibels, for the meter.
@@ -133,6 +141,10 @@ final class VoiceSession {
             .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
         try session.setActive(true)
         try engine.inputNode.setVoiceProcessingEnabled(true)
+        _ = engine.inputNode.setMutedSpeechActivityEventListener { [weak self] event in
+            guard event == .started else { return }
+            Task { @MainActor in self?.spokeOver() }
+        }
         if player.engine == nil { engine.attach(player) }
         engine.connect(player, to: engine.mainMixerNode, format: Self.said)
         try run()
@@ -171,6 +183,9 @@ final class VoiceSession {
         }
         engine.prepare()
         try engine.start()
+        // A player left playing while the engine restarts keeps counting time but plays nothing
+        // it is given afterwards. Stopping it first starts it afresh.
+        player.stop()
         player.play()
     }
 
@@ -220,6 +235,13 @@ final class VoiceSession {
                 Task { await loop?.heard(utterance) }
             }
         }
+    }
+
+    /// SpokeOver is iOS hearing the user while a reply plays, which stops the reply. What the
+    /// user said before the microphone came back is not heard.
+    private func spokeOver() {
+        guard status == .speaking, !muted else { return }
+        loop?.speechStarted()
     }
 
     private func show(_ status: VoiceStatus) {

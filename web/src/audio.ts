@@ -73,10 +73,18 @@ export function wav(samples: Float32Array, rate: number): Blob {
   return new Blob([view.buffer], { type: "audio/wav" });
 }
 
+/** audioSession is how an iPhone is told what a page's sound is; other browsers lack it. */
+const audioSession = (navigator as { audioSession?: { type: string } }).audioSession;
+/** reading counts the replies being read aloud outside voice mode. */
+let reading = 0;
+
 /** Play fetches a speech stream and schedules each chunk right after the one before it;
  *  onAudio runs once, when the first chunk is scheduled. Without a `shared` context it makes
  *  its own, which must happen during a click; voice mode passes one made when it started. */
 export function play(url: string, onAudio?: () => void, shared?: AudioContext): Playback {
+  // An iPhone mutes a page's sound along with its ringer unless the page calls it playback.
+  // Voice mode is not muted: its microphone makes the page a call.
+  if (!shared && audioSession && reading++ === 0) audioSession.type = "playback";
   const context = shared ?? new AudioContext();
   const abort = new AbortController();
   const sources: AudioBufferSourceNode[] = [];
@@ -147,7 +155,10 @@ export function play(url: string, onAudio?: () => void, shared?: AudioContext): 
       if (!stopped) throw error;
     })
     .finally(() => {
-      if (!shared) void context.close();
+      if (shared) return;
+      void context.close();
+      // The microphone cannot be used while the page is playback.
+      if (audioSession && --reading === 0) audioSession.type = "auto";
     });
   return { stop, done };
 }

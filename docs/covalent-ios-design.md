@@ -58,6 +58,22 @@ phone. Found there:
   words as the next message. Whether a phone's speaker does the same is for
   the phone to show; a guard waits on that.
 
+**Status, 2026-11-22:** the app ran on an iPhone 17 Pro. Found there:
+
+- Echo cancellation silences a reply well once it has settled, but settling
+  took from half a second to six seconds, and until then the reply reached the
+  microphone as loud as the user. The app took it for the user, stopped the
+  reply and sent the words as the next message. No bar on loudness separates
+  the two, so while a reply plays the microphone is muted and iOS's own
+  detector of speech reports the user talking over it. It reported nothing
+  through a reply's echo and did report a voice in the room.
+- The first reply after voice mode started was silent. iOS restarts the audio
+  engine once voice processing is on, and a player left playing across that
+  restart plays nothing. The app now stops and starts the player with the
+  engine.
+- Read aloud in the page was silent with the phone's ringer off, in the app
+  and in Safari. The page now marks it as playback.
+
 Step 15 is built in four parts, each checked on the Mac or in the simulator,
 and the phone is tested once at the end:
 
@@ -245,6 +261,11 @@ that does not need a phone, so its tests run with `swift test` on the Mac.
 - **Echo cancellation.** Voice processing is turned on for the audio engine's
   input. Without it the phone's speaker would be heard by its own microphone:
   the reply would interrupt itself, and talking over a reply would not work.
+  It needs up to some seconds to settle on a reply, and until then the reply
+  is as loud in the microphone as the user. So while a reply plays the
+  microphone is muted and iOS reports the user speaking over it
+  (`setMutedSpeechActivityEventListener`), which stops the reply. What the
+  user said before the microphone came back, about a second, is not heard.
 - **Listening.** A tap on the engine's input, converted to 16 kHz mono, feeds
   the detector and a buffer of the current utterance.
 - **Speaking.** The speech route's bytes are scheduled on a player node as

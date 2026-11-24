@@ -138,7 +138,7 @@ it on the public internet.
 `ios/` holds a native app that shows Covalent's own page, so the chat is the
 same one. Voice mode alone is the app's: the page's voice button starts it, and
 it is meant to keep talking with the phone locked or another app in front,
-which Safari cannot. It has not run on a phone yet. See
+which Safari cannot. It has run on one iPhone, with rough edges left. See
 [the iPhone design](docs/covalent-ios-design.md).
 
 1. Open `ios/Covalent.xcodeproj` in Xcode.
