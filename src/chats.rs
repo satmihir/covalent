@@ -321,6 +321,7 @@ impl Chats {
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|entry| searchable(entry["provider"].as_str().unwrap_or("")))
             .filter(|entry| usable(entry["id"].as_str().unwrap_or("")).is_some())
             .map(|entry| Model {
                 id: text(entry, "id"),
@@ -965,12 +966,18 @@ fn archived() -> Failure {
     )
 }
 
+/// Searchable is false for a provider re:agent cannot send a request to with web search on.
+/// Every chat here has it on, so that provider's models would fail on their first reply.
+fn searchable(provider: &str) -> bool {
+    provider != "gemini"
+}
+
 /// Offered accepts only catalog models, and only an effort the model lists, since re:agent
 /// takes any name at open and fails later. The empty effort is for a model that lists none.
 fn offered(model: &str, effort: Option<&str>) -> Result<(), Failure> {
     let invalid = |message: String| Err(Failure::new(400, "invalid_argument", message));
     let info = reagent::catalog::model_info(model);
-    if info.is_null() {
+    if info.is_null() || !searchable(info["provider"].as_str().unwrap_or("")) {
         return invalid(format!("{model} is not an offered model"));
     }
     let Some(effort) = effort else {
