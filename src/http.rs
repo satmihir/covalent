@@ -903,6 +903,7 @@ mod tests {
         let env = [
             ("OPENAI_API_KEY", "covalent-test-key".to_owned()),
             ("ANTHROPIC_API_KEY", String::new()),
+            ("GEMINI_API_KEY", "covalent-test-key".to_owned()),
             ("REAGENT_MODEL", String::new()),
             (
                 "REAGENT_OPENAI_BASE_URL",
@@ -929,12 +930,14 @@ mod tests {
             .map(|m| m["id"].as_str().unwrap())
             .collect();
         assert!(
-            ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol"]
+            ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra"]
                 .iter()
                 .all(|id| ids.contains(id)),
             "{models}"
         );
         assert!(!ids.iter().any(|id| id.starts_with("claude-")), "{models}");
+        // Gemini has a key here and is still left out: its requests cannot carry web search.
+        assert!(!ids.iter().any(|id| id.starts_with("gemini-")), "{models}");
         assert_eq!(models["default"], "gpt-6.1-sol");
         assert_eq!(models["default_effort"], "high");
         let newest = models["models"]
@@ -956,6 +959,7 @@ mod tests {
             json!({"model": "no-such-model"}),
             json!({"model": "gpt-6.1-sol", "effort": "none"}),
             json!({"model": "gpt-6.1-terra", "effort": ""}),
+            json!({"model": "gemini-4-hydrogen"}),
         ] {
             let (status, body) = call(&app, "POST", "/api/chats", refused).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

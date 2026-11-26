@@ -224,7 +224,9 @@ which voice mode feels most. The page remembers your last pick; switching an
 existing chat carries its history over to the new model, and the request after
 any change of model or effort is billed without the prompt cache. A ChatGPT
 plan does not serve every catalog model; a model it refuses fails on the first
-reply.
+reply. Gemini models are not offered yet, even with a Gemini key: every chat
+here can search the web, and re:agent cannot send a Gemini request with web
+search on.
 
 Archiving a chat removes it from Covalent and releases its Session, so it can
 be continued in a terminal with `reagent --resume ID` (shown when you archive).
