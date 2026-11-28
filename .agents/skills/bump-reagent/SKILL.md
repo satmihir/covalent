@@ -49,14 +49,4 @@ and what was not checked.
 
 ## 4. After the merge
 
-Covalent runs from its owner's terminal, with that shell's keys. Give these
-commands for the checkout it runs from, and do not restart it yourself:
-
-```bash
-git pull --ff-only
-cargo build --release
-```
-
-Then they press Ctrl-C and start `target/release/covalent` again. If `web/`
-changed, `cd web && npm run build` comes after the server build and right before
-the restart: the page breaks while new page code is served by the old server.
+Follow the `deploy` skill to put the merge into the running Covalent.
