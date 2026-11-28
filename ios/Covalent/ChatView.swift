@@ -140,6 +140,18 @@ private struct WebPage: UIViewRepresentable {
             return ours && type == .microphone ? .grant : .deny
         }
 
+        /// An address that answers with an error, such as a proxy with no Covalent behind it,
+        /// has failed too: shown as a page it is blank, with no way to change the address.
+        func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse) async
+            -> WKNavigationResponsePolicy
+        {
+            guard response.isForMainFrame,
+                let status = (response.response as? HTTPURLResponse)?.statusCode, status >= 400
+            else { return .allow }
+            failed("The address answered with an error (\(status)), not with Covalent.")
+            return .cancel
+        }
+
         func webView(
             _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
             withError error: Error

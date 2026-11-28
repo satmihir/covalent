@@ -327,8 +327,10 @@ missing one visible.
 ### First run
 
 One screen asks for Covalent's address, checks it with `GET /api/voice`, and
-saves it. A wrong or unreachable address says which it is. The address can be
-changed from the app's settings entry.
+saves it. A wrong or unreachable address says which it is. Afterwards the
+address can be changed only from the screen shown when Covalent can't be
+reached. That screen also appears when the address answers with an error, as a
+proxy does when the Covalent behind it has moved.
 
 ## What it needs from you
 
